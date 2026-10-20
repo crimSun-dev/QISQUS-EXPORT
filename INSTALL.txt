@@ -1,0 +1,33 @@
+QISCUS EXPORT - INSTALLING ON A NEW PC
+======================================
+
+1. Unzip this folder somewhere permanent, e.g. Documents\qexport
+   (not inside Downloads or a temporary folder: the tool keeps its data here).
+
+2. Double-click  install.bat
+   - It installs Python automatically if this PC doesn't have it (needs internet).
+   - It then walks you through connecting to Qiscus:
+       a. Chrome opens multichannel.qiscus.com. Log in with an ADMIN account.
+       b. Press F12, click the "Console" tab.
+       c. Paste (Ctrl+V) and press Enter. The installer already put the code on your clipboard.
+          First time only, Chrome may ask you to type   allow pasting   and press Enter first.
+       d. When the console says "Copied!", go back to the installer window and press Enter.
+   - It creates a "Qiscus Export" icon on the desktop.
+
+3. Use the "Qiscus Export" desktop icon (or double-click qexport.bat):
+     1 = download everything (first time takes about 1.5-2.5 hours; you can stop and continue later)
+     2 = update with only what's new
+     4 = rebuild the Excel file
+   The Excel file appears in the "exports" folder (menu option 8).
+
+IF SOMETHING GOES WRONG
+- "login expired" / exit code 2: menu option 7 to log in again, then option 1 to continue.
+  (Logging out of the Qiscus dashboard ends the login the tool uses.)
+- Windows SmartScreen warns about install.bat: click "More info" -> "Run anyway".
+- Python installer couldn't run: install Python 3.12 from python.org, tick
+  "Add python.exe to PATH", then run install.bat again.
+- To repair or update: run install.bat again. Your data and login are kept.
+
+PRIVACY
+The exports folder and the .env file contain personal data and a login.
+Don't share them, don't put them on shared drives. Full details: README.md
