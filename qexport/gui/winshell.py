@@ -25,12 +25,43 @@ def open_path(path: Path) -> None:
 
 def reveal(path: Path) -> None:
     """Open the folder that holds `path`, with the file selected."""
+    path = Path(path).resolve()
     if IS_WINDOWS:
-        subprocess.Popen(["explorer", f"/select,{path}"])
+        if not _shell_select(path):
+            # Explorer only understands /select,"<path>" with the quotes after the comma. A list
+            # argument gets quoted whole ("/select,G:\a b\c.xlsx") whenever the path has a space,
+            # and Explorer then silently opens Documents instead. Pass the command line verbatim.
+            subprocess.Popen(f'explorer.exe /select,"{path}"')
     elif sys.platform == "darwin":
         subprocess.Popen(["open", "-R", str(path)])
     else:
         subprocess.Popen(["xdg-open", str(path.parent)])
+
+
+def _shell_select(path: Path) -> bool:
+    """SHOpenFolderAndSelectItems: opens (or reuses) the folder window and selects the file,
+    with no command-line quoting involved. False if the shell refused."""
+    import ctypes
+    from ctypes import wintypes
+
+    shell32, ole32 = ctypes.windll.shell32, ctypes.windll.ole32
+    ole32.CoInitialize(None)          # this runs on a request thread; the shell call needs COM
+    pidl = ctypes.c_void_p()
+    try:
+        shell32.SHParseDisplayName.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p,
+                                               ctypes.POINTER(ctypes.c_void_p), wintypes.ULONG,
+                                               ctypes.POINTER(wintypes.ULONG)]
+        if shell32.SHParseDisplayName(str(path), None, ctypes.byref(pidl), 0, None) != 0 or not pidl:
+            return False
+        shell32.SHOpenFolderAndSelectItems.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p,
+                                                       wintypes.DWORD]
+        return shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0) == 0
+    except (OSError, AttributeError):
+        return False
+    finally:
+        if pidl:
+            ole32.CoTaskMemFree(pidl)
+        ole32.CoUninitialize()
 
 
 def recycle(path: Path) -> None:

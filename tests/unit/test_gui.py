@@ -241,6 +241,19 @@ def test_file_actions_only_accept_listed_files(gui, no_desktop):
     assert r["deleted"] == [p.name] and not p.exists()
 
 
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Explorer")
+def test_show_in_folder_fallback_quotes_the_path_after_select(monkeypatch, tmp_path):
+    import importlib
+    real = importlib.reload(winshell)               # undo the no_desktop stub for reveal
+    calls = []
+    monkeypatch.setattr(real, "_shell_select", lambda p: False)
+    monkeypatch.setattr(real.subprocess, "Popen", lambda cmd, *a, **k: calls.append(cmd))
+    f = tmp_path / "Draven's Files" / "a b.xlsx"
+    real.reveal(f)
+    # one verbatim string: a list argument would be quoted whole and Explorer would open Documents
+    assert calls == [f'explorer.exe /select,"{f.resolve()}"']
+
+
 # --------------------------------------------------------------------------- options
 
 def test_options_are_validated_in_plain_words():
