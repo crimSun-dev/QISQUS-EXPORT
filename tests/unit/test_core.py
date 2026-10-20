@@ -308,3 +308,37 @@ def test_global_call_unexpected_4xx_raises_api_request_error(client):
     with pytest.raises(ApiRequestError) as e:
         client.list_customer_rooms(None)
     assert "customer_rooms" in str(e.value) and "bad limit" in str(e.value)
+
+
+def test_run_lock_ignores_lockfile_left_by_a_dead_process(tmp_path):
+    from qexport.store.checkpoint import RunLock
+
+    lock = tmp_path / "x.lock"
+    lock.write_text("12345")             # what a killed run leaves behind
+    with RunLock(lock):
+        assert lock.exists()
+    assert not lock.exists()
+
+
+def test_run_lock_refuses_while_another_process_holds_it(tmp_path):
+    import subprocess
+    import sys
+
+    from qexport.store.checkpoint import RunLock, StoreLockedError
+
+    lock = tmp_path / "x.lock"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import sys, time; from pathlib import Path; "
+         "from qexport.store.checkpoint import RunLock\n"
+         "with RunLock(Path(sys.argv[1])):\n print('locked', flush=True); time.sleep(30)", str(lock)],
+        stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        with pytest.raises(StoreLockedError):
+            with RunLock(lock):
+                pass
+    finally:
+        holder.kill()
+        holder.wait()
+    with RunLock(lock):                  # killed holder never cleaned up; lock is free again
+        pass

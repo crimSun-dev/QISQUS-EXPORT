@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qexport"
-version = "1.0.1"
+version = "1.0.2"
 description = "Bulk exporter for Qiscus Omnichannel: conversations, broadcasts, recipient actions -> one .xlsx"
 requires-python = ">=3.11"
 dependencies = [

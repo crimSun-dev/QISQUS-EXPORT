@@ -11,7 +11,7 @@ action layers asked for in the 2026-10-16 screen recording (see "What changed vs
 
 ## Install on a new PC (no command line)
 
-1. Copy `dist\qexport-1.0.1.zip` to the PC and unzip it somewhere permanent (e.g. `Documents\qexport`).
+1. Copy `dist\qexport-1.0.2.zip` to the PC and unzip it somewhere permanent (e.g. `Documents\qexport`).
 2. Double-click **`install.bat`**. It:
    - finds Python 3.11+, or installs Python 3.12 with `winget` (falls back to opening python.org);
    - creates a private environment in `.venv` and installs qexport into it;

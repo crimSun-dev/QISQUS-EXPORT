@@ -77,29 +77,51 @@ def _job_signature(j: BroadcastJobRecord) -> str:
 
 
 class RunLock:
-    """Exclusive lockfile next to the store; a second instance exits with a clear message."""
+    """Exclusive OS lock on a file next to the store; a second instance exits with a clear message.
+
+    The OS drops the lock when the process dies (window closed, killed, power loss), so a lockfile
+    left behind is harmless: the next run just locks it again."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._fd: int | None = None
 
     def __enter__(self) -> RunLock:
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR)
         try:
-            self._fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(self._fd, str(os.getpid()).encode())
-        except FileExistsError as e:
+            _lock_fd(fd)
+        except OSError as e:
+            os.close(fd)
             raise StoreLockedError(
-                f"{self.path} exists: another qexport run is active. If none is, delete that file.") from e
+                f"{self.path} is locked: another qexport run is active. Close the other qexport "
+                "window first.") from e
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 1, os.SEEK_SET)     # byte 0 is the lock; keep the PID clear of it
+        os.write(fd, str(os.getpid()).encode())
+        self._fd = fd
         return self
 
     def __exit__(self, *exc) -> None:
         if self._fd is not None:
-            os.close(self._fd)
+            os.close(self._fd)           # releases the lock
             self._fd = None
             try:
                 self.path.unlink()
-            except FileNotFoundError:
+            except OSError:              # already gone, or another run grabbed it in between
                 pass
+
+
+def _lock_fd(fd: int) -> None:
+    """Non-blocking exclusive lock on byte 0; raises OSError if another process holds it."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 class CheckpointStore:
