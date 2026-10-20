@@ -47,6 +47,12 @@ class ItemRejectedError(QiscusError):
         self.item, self.status, self.detail = item, status, detail
 
 
+class ItemGoneError(ItemRejectedError):
+    """Qiscus no longer has the item ("broadcast_job not found"): it keeps a campaign's recipient
+    log for a limited time (about 14 months, seen 2026-10-20), then answers 400 for it. Permanent:
+    record it once, never retry, and don't let it trip the circuit breaker."""
+
+
 class ApiRequestError(QiscusError):
     """Unexpected 4xx on a *global* call -> abort run (resumable) with Qiscus's reason, not a traceback."""
 
@@ -319,7 +325,10 @@ class QiscusClient:
         if resp.status_code in (403, 404):
             raise RoomAccessError(f"broadcast job {job_id}", resp.status_code)
         if resp.status_code >= 400:
-            raise ItemRejectedError(f"broadcast job {job_id}", resp.status_code, _detail(resp))
+            detail = _detail(resp)
+            if resp.status_code == 400 and "not found" in detail.lower():
+                raise ItemGoneError(f"broadcast job {job_id}", resp.status_code, detail)
+            raise ItemRejectedError(f"broadcast job {job_id}", resp.status_code, detail)
         data = self._json(resp, "broadcast_logs")
         logs = self._parse(RawBroadcastLog, self._dig(data, "broadcast_logs", "data", "broadcast_logs"),
                            "broadcast_logs")

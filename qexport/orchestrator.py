@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Protocol
 
 from qexport.api.client import (
-    ApiRequestError, AuthError, ItemRejectedError, NetworkExhausted, QiscusClient, RateLimitExhausted,
-    RoomAccessError, SchemaDriftError,
+    ApiRequestError, AuthError, ItemGoneError, ItemRejectedError, NetworkExhausted, QiscusClient,
+    RateLimitExhausted, RoomAccessError, SchemaDriftError,
 )
 from qexport.config import Settings
 from qexport.extract.broadcasts import BroadcastEnumerator, BroadcastLogFetcher
@@ -169,7 +169,11 @@ class ExportOrchestrator:
         if write_xlsx:
             reports.append(self.write(out_path, include_recipients=include_recipients_sheet))
         report = reports[-1] if reports else None
-        skipped = self._store.skipped()
+        # Judge this run by what it fetched: a conversations-only run isn't partial because of
+        # broadcast campaigns, and vice versa.
+        kinds = {k for k, on in (("room", include_messages),
+                                 ("broadcast job", include_broadcasts and self._log_fetch is not None)) if on}
+        skipped = [s for s in self._store.skipped() if s[0] in kinds]
         if skipped or self._broadcast_note:
             return RunResult(EXIT_PARTIAL, report, self._broadcast_note + (
                 f"{len(skipped)} item(s) could not be exported; "
@@ -245,10 +249,20 @@ class ExportOrchestrator:
         jobs = list(self._store.iter_jobs_to_fetch(self._s.max_room_attempts, self._s.broadcasts_since, limit))
         self._p.phase("Downloading broadcast recipient logs", len(jobs))
         streak: tuple[str, int] = ("", 0)
+        gone = 0
         for job_id, name, _total in jobs:
             self._p.item(name)
             try:
                 logs = self._log_fetch.fetch_job(job_id)
+            except ItemGoneError as e:
+                # Expired at Qiscus: nothing to retry, and a run of these is normal, not an outage.
+                self._store.mark_job_gone(job_id, e.detail or str(e))
+                if gone == 0:
+                    self._p.warn(f"broadcast {name!r} and older: Qiscus no longer keeps the recipient "
+                                 "list (only the campaign totals). Marking such campaigns as not kept.")
+                gone += 1
+                self._p.advance(1, recipients=0)
+                continue
             except _ITEM_ERRORS as e:
                 self._store.mark_job_failed(job_id, f"{type(e).__name__}: {e}", self._s.max_room_attempts)
                 self._p.warn(f"broadcast {name!r}: {type(e).__name__}")
@@ -265,6 +279,8 @@ class ExportOrchestrator:
             self._store.commit_job_logs(job_id, logs)
             streak = ("", 0)
             self._p.advance(1, recipients=len(logs))
+        if gone:
+            self._p.warn(f"{gone:,} campaign(s): Qiscus no longer keeps their recipient lists.")
 
 
 def _bump_streak(streak: tuple[str, int], kind: str) -> tuple[str, int]:

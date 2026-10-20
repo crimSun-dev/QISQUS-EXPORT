@@ -38,7 +38,7 @@ BLOCK_OTHER_WINDOW = ("A download is running in another qexport window (the blac
 BLOCK_CHECKING = "Checking the downloaded data after an unexpected shutdown. This takes a minute."
 BLOCK_DAMAGED = ("The downloaded data file failed its health check. Copy the diagnostics and send "
                  "them to support before downloading more.")
-BLOCK_LOGIN = "Log in to Qiscus first (the Login button at the top)."
+BLOCK_LOGIN = "Sign in to Qiscus first (the button at the top right)."
 
 
 class UserError(Exception):
@@ -111,8 +111,9 @@ class Options:
 
 
 class GuiApp:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, auto_signin: bool = False) -> None:
         self.root = root
+        self.auto_signin = auto_signin      # no login saved yet: open the Qiscus sign-in window at start
         self.env_file = root / ".env"
         self.exports = root / "exports"
         self.exports.mkdir(parents=True, exist_ok=True)
@@ -151,6 +152,11 @@ class GuiApp:
         threading.Thread(target=self._background, name="qexport-gui-refresh", daemon=True).start()
         if self._settings is not None:
             self.check_login_async()
+        elif self.auto_signin:
+            from qexport.login import find_browser
+
+            if find_browser() is not None:
+                self.login_browser_start(delay_s=2.5)    # let the app window open first
 
     def close(self) -> None:
         """Stop tasks at a safe point and release every lock. Idempotent."""
@@ -179,7 +185,8 @@ class GuiApp:
                 log.exception("refresh failed")
             if self._other_window:
                 self._try_take_store()
-            if self._settings is not None and time.monotonic() - self._login_checked_at > LOGIN_RECHECK_S:
+            if self._settings is not None and self.login.get("state") != "signing_in" \
+                    and time.monotonic() - self._login_checked_at > LOGIN_RECHECK_S:
                 self.check_login_async()
             # No window for a while: keep going while tasks run, then exit on our own.
             last = self.last_heartbeat or self.started
@@ -348,6 +355,7 @@ class GuiApp:
         p = r.progress()
         missing = r.missing(self._settings.broadcasts_since if self._settings else None)
         size = sum(f.stat().st_size for f in (path, Path(str(path) + "-wal")) if f.exists())
+        gone, gone_newest = r.jobs_gone()
         run = r.run_info()
         return {
             "exists": True, "path": str(path), "size_mb": round(size / 1e6, 1),
@@ -356,6 +364,7 @@ class GuiApp:
             "messages": p.messages, "jobs_total": p.jobs_total, "jobs_done": p.jobs_done,
             "jobs_pending": missing.jobs_pending, "jobs_failed": p.jobs_failed, "jobs_skipped": p.jobs_skipped,
             "jobs_listed": p.broadcast_enumeration_done, "jobs_not_sent": r.jobs_not_sent_yet(),
+            "jobs_gone": gone, "jobs_gone_newest": (gone_newest or "")[:10],
             "broadcast_logs": p.broadcast_logs, "complete": missing.complete,
             "completeness": missing.describe(), "last_completed": run.get("last_completed_at_utc"),
             "rooms_missing": missing.rooms_pending, "rooms_failed_total": missing.rooms_failed,
@@ -375,7 +384,7 @@ class GuiApp:
                         "detail": "Excel files appear in the list on the right as soon as there is data.",
                         "action": None}
             return {"level": "empty", "headline": "Nothing downloaded yet.",
-                    "detail": "Log in to Qiscus, then press Download everything." if self._settings is None
+                    "detail": "Sign in to Qiscus, then press Download everything." if self._settings is None
                     else "Press Download everything to start. It takes 1.5 to 2.5 hours the first time "
                          "and can be paused or stopped at any point.",
                     "action": "login" if self._settings is None else "download"}
@@ -384,10 +393,13 @@ class GuiApp:
                      and not store["rooms_failed_total"]
                      else f"{store['rooms_done']:,} of {rooms:,} conversations downloaded")
         jobs_ok = store["jobs_listed"] and not store["jobs_pending"] and not store["jobs_failed_total"]
-        fetchable = jobs - store["jobs_not_sent"]
-        bc_line = (f"all {fetchable:,} sent broadcast campaigns downloaded" if jobs_ok
-                   else f"{store['jobs_done']:,} of {fetchable:,} sent broadcast campaigns downloaded")
+        fetchable = jobs - store["jobs_not_sent"] - store.get("jobs_gone", 0)
+        bc_line = (f"all {fetchable:,} available broadcast campaigns downloaded" if jobs_ok
+                   else f"{store['jobs_done']:,} of {fetchable:,} available broadcast campaigns downloaded")
         notes = []
+        if store.get("jobs_gone"):
+            notes.append(f"{store['jobs_gone']:,} older campaigns (up to {store['jobs_gone_newest']}): Qiscus no "
+                         "longer keeps who received them, so only their totals are in the Excel file.")
         if store["jobs_not_sent"]:
             notes.append(f"{store['jobs_not_sent']:,} campaigns haven't been sent yet; they are picked up "
                          "once they go out.")
@@ -580,6 +592,37 @@ class GuiApp:
     def login_read_clipboard(self) -> dict:
         return self.login_save(winshell.clipboard_get(), from_clipboard=True)
 
+    def login_browser_start(self, delay_s: float = 0.0) -> dict:
+        """Open the Qiscus sign-in window; the login is picked up in the background."""
+        if self.login.get("state") == "signing_in":
+            return self.login
+        self.login = {"state": "signing_in", "message": "Opening the Qiscus sign-in window…"}
+        threading.Thread(target=self._browser_login, args=(delay_s,), name="qexport-signin", daemon=True).start()
+        return self.login
+
+    def _browser_login(self, delay_s: float = 0.0) -> None:
+        from qexport.login import BrowserLoginError, browser_login
+
+        if delay_s:
+            time.sleep(delay_s)
+
+        def status(msg: str) -> None:
+            self.login = {**self.login, "message": msg}
+            self.note("app", msg)
+        try:
+            creds = browser_login(self.exports / ".qexport_signin", on_status=status)
+            result = self._apply_creds(creds)
+        except (BrowserLoginError, UserError) as e:
+            self.login = {"state": "signin_failed", "message": str(e)}
+            self.note("app", f"Sign-in did not finish: {e}")
+            return
+        except Exception as e:   # noqa: BLE001
+            log.exception("browser sign-in failed")
+            self.login = {"state": "signin_failed", "message": f"{type(e).__name__}: {e}"}
+            return
+        self.login = {**result, "message": "Connected." if result["state"] == "ok"
+                      else "Signed in, but Qiscus refused the login. Make sure it's an admin account."}
+
     def login_save(self, text: str, from_clipboard: bool = False) -> dict:
         creds = parse_credentials(text or "")
         missing = [k for k in CRED_KEYS if not creds.get(k)]
@@ -587,6 +630,9 @@ class GuiApp:
             where = "on the clipboard" if from_clipboard else "in the pasted text"
             raise UserError(f"Couldn't find the login values {where} (missing {', '.join(missing)}). "
                             "Run the snippet again in the Qiscus tab; it says 'Copied!' when it worked.")
+        return self._apply_creds(creds)
+
+    def _apply_creds(self, creds: dict[str, str]) -> dict:
         new_app = creds["QISCUS_APP_CODE"]
         if self._app_code and new_app != self._app_code and self.manager.active():
             raise UserError("That login is for a different Qiscus app. Stop the running tasks first.")

@@ -11,21 +11,25 @@ action layers asked for in the 2026-10-16 screen recording (see "What changed vs
 
 ## Install on a new PC (no command line)
 
-1. Copy `dist\qexport-1.1.0.zip` to the PC and unzip it somewhere permanent (e.g. `Documents\qexport`).
-2. Double-click **`install.bat`**. It:
+1. Send the PC `dist\qexport-1.2.0.zip` (or just `dist\Install Qiscus Export.bat`).
+2. Open the zip and double-click **Install Qiscus Export.bat**. No need to extract first: the one
+   file carries the whole program. It:
+   - unpacks qexport into `%LOCALAPPDATA%\Qiscus Export` (the login and downloaded data live there too);
    - finds Python 3.11+, or installs Python 3.12 with `winget` (falls back to opening python.org);
    - creates a private environment in `.venv` and installs qexport into it;
-   - runs `qexport setup`, which puts the console snippet on the clipboard, opens Qiscus, and reads
-     the login values back once you've run the snippet (see `INSTALL.txt` for the click-by-click);
    - adds two desktop shortcuts: **Qiscus Export** (the window) and **Qiscus Export (menu)** (the
-     old numbered console menu, kept as a fallback).
-3. Use **Qiscus Export** (or `qexport-app.bat`). See "The window" below.
+     old numbered console menu, kept as a fallback);
+   - opens Qiscus Export.
+3. The first time, Qiscus Export opens a **Qiscus sign-in window** by itself. Sign in with an admin
+   account as usual; it connects on its own and the window closes. No F12 or console steps.
 
-Re-running `install.bat` repairs or updates the install and keeps `.env` and `exports\`.
-`qexport.bat <command>` runs any command directly, e.g. `qexport.bat status`.
+Running the installer again updates the program and keeps the login and `exports\`. It asks no
+questions; it only stops to show an error. `qexport.bat <command>` runs any command directly, e.g.
+`qexport.bat status`.
 
-To build the zip after changing the code: `python tools/build_zip.py` (it never includes `.env`,
-`exports\` or `.venv`).
+To build the installer after changing the code: `python tools/build_zip.py`. It writes
+`dist\Install Qiscus Export.bat` and `dist\qexport-<version>.zip`, and never includes `.env`,
+`exports\` or `.venv`.
 
 ## The window (`qexport gui`)
 
@@ -71,18 +75,30 @@ Python 3.11+. On Windows the `tzdata` dependency is required for `Asia/Jakarta`.
 
 ## Credentials
 
-The tool reuses the dashboard session of an **admin** account. Log in at
-`multichannel.qiscus.com`, open DevTools → Console, and run:
+The tool reuses the dashboard session of an **admin** account. The usual way is the sign-in window:
+**Sign in to Qiscus** in the app (opened automatically when no login is saved), or `qexport setup`
+in a console. It opens `multichannel.qiscus.com` in its own Edge/Chrome window with a separate
+profile. You sign in on Qiscus's own page (so the password only goes to Qiscus, and 2FA or captcha
+work as normal). qexport then reads the session the dashboard stores (`localStorage['qismo-data']`)
+through the browser's DevTools port on 127.0.0.1, saves it to `.env`, checks it, and closes the
+window. The sign-in profile is kept in `exports\.qexport_signin`, so refreshing an expired login is
+usually instant.
+
+Fallback without the sign-in window (`qexport setup --manual`, or *Other way* in the app's login
+dialog): log in at `multichannel.qiscus.com`, open DevTools → Console, and run:
 
 ```js
 (() => { const d = JSON.parse(localStorage.getItem('qismo-data'));
-  console.log(`QISCUS_APP_CODE=${d.user.app.app_code}\nQISCUS_ADMIN_TOKEN=${d.user.authentication_token}\nQISCUS_SDK_USER_ID=${d.details.sdk_user.id}\nQISCUS_SDK_TOKEN=${d.details.sdk_user.token}\nQISCUS_ROLE=${d.user.type_as_string}`); })()
+  console.log(`QISCUS_APP_CODE=${d.user.app.app_code}
+QISCUS_ADMIN_TOKEN=${d.user.authentication_token}
+QISCUS_SDK_USER_ID=${d.details.sdk_user.id}
+QISCUS_SDK_TOKEN=${d.details.sdk_user.token}
+QISCUS_ROLE=${d.user.type_as_string}`); })()
 ```
 
 Paste the output into `.env` in this folder (template: `.env.example`). `.env` is git-ignored.
-Or run `qexport setup`, which does the copying for you.
 The admin token is a session token: **logging out of the dashboard invalidates it**. If a run stops
-with exit code 2, refresh `.env` the same way and run `qexport resume`.
+with exit code 2, sign in again and continue (`qexport resume` in a console).
 
 ```powershell
 qexport auth-check        # OK / FAILED for each API

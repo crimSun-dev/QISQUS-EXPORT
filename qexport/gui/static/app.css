@@ -216,4 +216,6 @@ legend { font-weight: 650; padding: 0 4px; }
 .result.error { color: var(--error); }
 .result:empty { display: none; }
 #confirm-body { display: grid; gap: 8px; }
+.signin { display: grid; gap: 8px; justify-items: start; padding: 4px 0 6px; }
+.signin .btn { font-size: 15px; padding: 10px 20px; }
 .confirm-list { margin: 0; padding-left: 18px; max-height: 220px; overflow: auto; font-size: 13px; }

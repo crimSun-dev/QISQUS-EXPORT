@@ -23,6 +23,11 @@ from qexport.transform.normalize import (
 
 SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 30_000   # a writer waits this long for another task's transaction before failing
+# Campaigns whose recipient log Qiscus no longer keeps are logs_state='skipped' with this prefix on
+# last_error (the CHECK constraint has no room for a new state). They are never retried and never
+# make an export "missing" anything: there is nothing left to download.
+GONE_PREFIX = "Not kept by Qiscus: "
+_GONE_LIKE = GONE_PREFIX + "%"
 _NO_LOGS_YET = tuple(ep.JOB_STATUS[s] for s in sorted(ep.JOB_NO_LOGS_YET_STATUSES))
 
 
@@ -305,13 +310,15 @@ class CheckpointStore:
                    WHERE room_id=?""", (error[:500], max_attempts, room_id))
 
     def reset_failed(self) -> int:
+        """Failed/skipped items back to pending. Campaigns Qiscus no longer keeps stay as they are."""
         with self._tx():
             n = self._db.execute(
                 "UPDATE rooms SET fetch_state='pending', attempts=0 "
                 "WHERE fetch_state IN ('failed','skipped')").rowcount
             n += self._db.execute(
                 "UPDATE broadcast_jobs SET logs_state='pending', attempts=0 "
-                "WHERE logs_state IN ('failed','skipped')").rowcount
+                "WHERE logs_state IN ('failed','skipped') AND coalesce(last_error, '') NOT LIKE ?",
+                (_GONE_LIKE,)).rowcount
         return n
 
     # ------------------------------------------------------------------ broadcasts
@@ -404,6 +411,20 @@ class CheckpointStore:
                 """UPDATE broadcast_jobs SET attempts=attempts+1, last_error=?,
                      logs_state=CASE WHEN attempts+1 >= ? THEN 'skipped' ELSE 'failed' END
                    WHERE job_id=?""", (error[:500], max_attempts, job_id))
+
+    def mark_job_gone(self, job_id: int, detail: str) -> None:
+        """Qiscus answered 'not found' for this campaign's recipient log: record it, once, for good."""
+        with self._tx():
+            self._db.execute(
+                "UPDATE broadcast_jobs SET logs_state='skipped', last_error=? WHERE job_id=?",
+                ((GONE_PREFIX + detail)[:500], job_id))
+
+    def jobs_gone(self) -> tuple[int, str | None]:
+        """(count, newest created_at_utc) of campaigns whose recipient log Qiscus no longer keeps."""
+        row = self._db.execute(
+            "SELECT COUNT(*), MAX(created_at_utc) FROM broadcast_jobs "
+            "WHERE logs_state='skipped' AND last_error LIKE ?", (_GONE_LIKE,)).fetchone()
+        return row[0], row[1]
 
     def campaign_for_wamid(self, wamid: str) -> CampaignRef | None:
         row = self._db.execute(
@@ -568,7 +589,8 @@ class CheckpointStore:
         rows = [("room", r[0], r[1] or "") for r in self._db.execute(
             "SELECT room_id, last_error FROM rooms WHERE fetch_state IN ('skipped','failed')")]
         rows += [("broadcast job", str(r[0]), r[1] or "") for r in self._db.execute(
-            "SELECT job_id, last_error FROM broadcast_jobs WHERE logs_state IN ('skipped','failed')")]
+            "SELECT job_id, last_error FROM broadcast_jobs WHERE logs_state IN ('skipped','failed') "
+            "AND coalesce(last_error, '') NOT LIKE ?", (_GONE_LIKE,))]
         return rows
 
     def progress(self) -> Progress:
@@ -593,7 +615,8 @@ class CheckpointStore:
             "SELECT fetch_state, COUNT(*) FROM rooms GROUP BY fetch_state").fetchall())
         sql = ("SELECT logs_state, COUNT(*) FROM broadcast_jobs "
                f"WHERE status NOT IN ({','.join('?' * len(_NO_LOGS_YET))})")
-        params: tuple = _NO_LOGS_YET
+        sql += " AND coalesce(last_error, '') NOT LIKE ?"
+        params: tuple = (*_NO_LOGS_YET, _GONE_LIKE)
         if since is not None:
             sql += " AND created_at_utc >= ?"
             params += (since.isoformat(),)

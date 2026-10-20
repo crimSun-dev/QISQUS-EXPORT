@@ -1,20 +1,18 @@
 QISCUS EXPORT - INSTALLING ON A NEW PC
 ======================================
 
-1. Unzip this folder somewhere permanent, e.g. Documents\qexport
-   (not inside Downloads or a temporary folder: the tool keeps its data here).
-
-2. Double-click  install.bat
+1. Open the zip and double-click  Install Qiscus Export.bat
+   (no need to extract anything first; that one file contains the whole program).
    - It installs Python automatically if this PC doesn't have it (needs internet).
-   - It then walks you through connecting to Qiscus:
-       a. Chrome opens multichannel.qiscus.com. Log in with an ADMIN account.
-       b. Press F12, click the "Console" tab.
-       c. Paste (Ctrl+V) and press Enter. The installer already put the code on your clipboard.
-          First time only, Chrome may ask you to type   allow pasting   and press Enter first.
-       d. When the console says "Copied!", go back to the installer window and press Enter.
-   - It creates two icons on the desktop: "Qiscus Export" and "Qiscus Export (menu)".
+   - It installs Qiscus Export into your user folder and puts two icons on the desktop:
+     "Qiscus Export" and "Qiscus Export (menu)".
+   - It opens Qiscus Export when it's done.
 
-3. Open the "Qiscus Export" icon. The window tells you what is downloaded and what to press:
+2. The first time, a Qiscus sign-in window opens by itself. Sign in with an ADMIN account,
+   exactly as you normally would. Qiscus Export connects on its own and the window closes.
+   (No F12, no console, nothing to copy.)
+
+3. From then on, open the "Qiscus Export" icon. The window tells you what is downloaded and what to press:
      Download everything   first time takes about 1.5-2.5 hours; pause or stop any time, nothing is lost
      Update new activity   only conversations and campaigns with something new
      Build Excel now       a fresh Excel file from what is downloaded, even while downloading
@@ -23,16 +21,19 @@ QISCUS EXPORT - INSTALLING ON A NEW PC
    The old numbered menu still works: "Qiscus Export (menu)" or qexport.bat.
 
 IF SOMETHING GOES WRONG
-- "Login expired": press Refresh login in the window, follow the three steps, then Continue downloads.
+- "Login expired": press Refresh login (or Sign in again) and sign in in the Qiscus window
+  that opens, then press Continue downloads.
   (Logging out of the Qiscus dashboard ends the login the tool uses.)
 - The window says another qexport window is downloading: a console run is still going. Wait for it
   to finish, or close that black window; the buttons come back by themselves.
 - Something looks wrong: press Copy diagnostics (bottom left) and paste it to support.
   It never contains the login.
-- Windows SmartScreen warns about install.bat: click "More info" -> "Run anyway".
+- Windows SmartScreen warns about the installer: click "More info" -> "Run anyway".
 - Python installer couldn't run: install Python 3.12 from python.org, tick
-  "Add python.exe to PATH", then run install.bat again.
-- To repair or update: run install.bat again. Your data and login are kept.
+  "Add python.exe to PATH", then run Install Qiscus Export.bat again.
+- To repair or update: run Install Qiscus Export.bat again. Your data and login are kept.
+- The sign-in window doesn't open (no Edge or Chrome): in the login dialog, use
+  "Other way: copy the login from the Qiscus console".
 
 PRIVACY
 The exports folder and the .env file contain personal data and a login.

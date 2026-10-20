@@ -124,7 +124,7 @@ def test_event_stream_sends_state(served):
 def test_user_errors_come_back_as_plain_messages(served):
     srv, base = served
     r = httpx.post(f"{base}/api/download", json={}, headers={"X-QX-Token": srv.token})
-    assert r.status_code == 400 and "Log in to Qiscus first" in r.json()["error"]
+    assert r.status_code == 400 and "Sign in to Qiscus first" in r.json()["error"]
 
 
 # --------------------------------------------------------------------------- dashboard
@@ -282,6 +282,51 @@ def test_login_wizard_reads_clipboard_saves_env_and_checks(gui, no_desktop):
     assert r["state"] == "ok" and not r["not_admin"]
     assert ADMIN_TOKEN in (gui.root / ".env").read_text(encoding="utf-8")
     assert gui.state()["logged_in"] and gui.manager.blocked_reason is None
+
+
+@respx.mock
+def test_sign_in_window_connects_without_the_console(gui, monkeypatch):
+    import time as time_mod
+
+    from qexport import login as login_mod
+    respx.post(f"{OMNI}/api/v2/customer_rooms").mock(return_value=httpx.Response(200, json=rooms_page([], None)))
+    respx.get(f"{SDK}/api/v2/sdk/my_profile").mock(return_value=httpx.Response(200, json={}))
+    seen = {}
+
+    def fake_browser_login(profile_dir, on_status=None, **k):
+        seen["profile"] = profile_dir
+        on_status("A Qiscus window opened. Sign in there with your admin account.")
+        return {"QISCUS_APP_CODE": APP, "QISCUS_ADMIN_TOKEN": ADMIN_TOKEN, "QISCUS_SDK_USER_ID": ADMIN_EMAIL,
+                "QISCUS_SDK_TOKEN": SDK_TOKEN, "QISCUS_ROLE": "admin"}
+    monkeypatch.setattr(login_mod, "browser_login", fake_browser_login)
+    monkeypatch.setattr(login_mod, "find_browser", lambda: "edge.exe")
+    gui.auto_signin = True
+    gui.start()                                       # no login saved: sign-in starts by itself
+    for _ in range(500):
+        if gui.login.get("state") == "ok":
+            break
+        time_mod.sleep(0.01)
+    assert gui.login["state"] == "ok" and gui.state()["logged_in"]
+    assert seen["profile"] == gui.exports / ".qexport_signin"
+    assert ADMIN_TOKEN in (gui.root / ".env").read_text(encoding="utf-8")
+
+
+def test_sign_in_window_closed_early_says_so(gui, monkeypatch):
+    import time as time_mod
+
+    from qexport import login as login_mod
+
+    def closed(*a, **k):
+        raise login_mod.BrowserLoginError("The Qiscus window was closed before signing in finished.")
+    monkeypatch.setattr(login_mod, "browser_login", closed)
+    gui.start()
+    gui.login_browser_start()
+    for _ in range(300):
+        if gui.login["state"] != "signing_in":
+            break
+        time_mod.sleep(0.01)
+    assert gui.login["state"] == "signin_failed" and "closed before" in gui.login["message"]
+    assert not (gui.root / ".env").exists()
 
 
 def test_login_with_missing_values_explains_what_to_do(gui):

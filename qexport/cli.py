@@ -278,6 +278,10 @@ def status() -> None:
                   f"{p.jobs_skipped:,}")
         console.print(t)
         console.print(f"Messages stored: {p.messages:,}   Broadcast recipient rows: {p.broadcast_logs:,}")
+        gone, newest = store.jobs_gone()
+        if gone:
+            console.print(f"{gone:,} campaigns (created up to {newest[:10]}): Qiscus no longer keeps their "
+                          "recipient lists; only their totals are exported. (Counted under Skipped.)")
         for kind, ident, err in store.skipped()[:20]:
             console.print(f"[yellow]{kind} {ident}[/]: {err}")
     finally:
@@ -390,13 +394,42 @@ def _collect_credentials() -> dict[str, str] | None:
     return None
 
 
+def _browser_credentials() -> dict[str, str] | None:
+    """Sign in in a Qiscus window and read the login from it. None if that isn't possible here."""
+    from qexport.login import BrowserLoginError, browser_login, find_browser
+
+    if find_browser() is None:
+        return None
+    console.print("A Qiscus window is opening. [bold]Sign in there[/] with an [bold]admin[/] account; "
+                  "this connects by itself (your password goes only to Qiscus).")
+    try:
+        with console.status("Waiting for you to sign in…"):
+            return browser_login(Path("exports") / ".qexport_signin")
+    except BrowserLoginError as e:
+        console.print(f"[yellow]{e}[/]")
+        return None
+
+
 @app.command()
 def setup(env_file: Path = typer.Option(Path(".env"), "--env-file", help="Where to save credentials"),
-          no_browser: bool = typer.Option(False, "--no-browser", help="Don't open the Qiscus dashboard")) -> None:
-    """Guided credential setup: copies the console snippet, reads the values back, writes .env."""
+          no_browser: bool = typer.Option(False, "--no-browser", help="Don't open the Qiscus dashboard"),
+          manual: bool = typer.Option(False, "--manual", help="Use the console snippet instead of the "
+                                                              "sign-in window")) -> None:
+    """Connect to Qiscus: sign in in a Qiscus window (or, with --manual, copy the login from the
+    browser console), then save it to .env and check it."""
+    console.rule("[bold]qexport - connect to Qiscus")
+    creds = None if (manual or no_browser) else _browser_credentials()
+    if creds is None:
+        creds = _manual_credentials(no_browser)
+    _save_and_check(env_file, creds)
+
+
+def _manual_credentials(no_browser: bool) -> dict[str, str]:
+    """The console-snippet flow: copies the snippet, reads the values back from the clipboard."""
     import webbrowser
 
-    console.rule("[bold]qexport - connect to Qiscus")
+    if not no_browser:
+        console.print("Using the console method instead.")
     copied = _clipboard_set(CONSOLE_SNIPPET)
     console.print(
         "1. In [bold]Chrome[/], log in to [cyan]https://multichannel.qiscus.com[/] with an [bold]admin[/] account.\n"
@@ -422,8 +455,11 @@ def setup(env_file: Path = typer.Option(Path(".env"), "--env-file", help="Where 
     if creds is None:
         console.print("\n[red]Setup not finished.[/] Run `qexport setup` again when you're ready.")
         raise typer.Exit(EXIT_AUTH)
+    return creds
 
-    creds ={k: creds[k] for k in (*CRED_KEYS, "QISCUS_ROLE") if creds.get(k)}
+
+def _save_and_check(env_file: Path, creds: dict[str, str]) -> None:
+    creds = {k: creds[k] for k in (*CRED_KEYS, "QISCUS_ROLE") if creds.get(k)}
     write_env(env_file, creds)
     console.print(f"Saved credentials to [bold]{env_file.resolve()}[/]")
     if creds.get("QISCUS_ROLE", "admin") != "admin":

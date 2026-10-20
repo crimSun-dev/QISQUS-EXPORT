@@ -18,6 +18,14 @@ echo    qexport - Qiscus chat / broadcast exporter setup
 echo  =====================================================
 echo.
 
+rem Double-clicked inside a zip without extracting: Windows copies only this file to a temp folder.
+if not exist "%~dp0pyproject.toml" (
+  echo  This file was opened from inside the zip, so the program files are missing.
+  echo  Use "Install Qiscus Export.bat" instead, or right-click the zip, choose
+  echo  "Extract All", and run install.bat from the extracted folder.
+  goto :fail
+)
+
 rem ---------------------------------------------------------------- 1. Python
 echo [1/5] Looking for Python 3.11 or newer...
 call :find_python
@@ -69,17 +77,18 @@ if errorlevel 1 (
 echo       Installed.
 
 rem ---------------------------------------------------------------- 4. credentials
+rem No questions here: when the app opens without a saved login it opens the Qiscus sign-in
+rem window by itself, and connects as soon as you have signed in.
 echo [4/5] Qiscus login...
-if not exist ".env" goto :do_setup
-"%VPY%" -m qexport auth-check
-if errorlevel 1 goto :do_setup
-choice /c YN /n /m "      Saved login works. Replace it with a different account? [Y/N] "
-if errorlevel 2 goto :shortcut
-:do_setup
-"%VPY%" -m qexport setup
+if not exist ".env" (
+  echo       You'll sign in to Qiscus in a moment, in a window the app opens.
+  goto :shortcut
+)
+"%VPY%" -m qexport auth-check >nul 2>&1
 if errorlevel 1 (
-  echo.
-  echo  Login setup was not completed. You can finish it later from the menu, option 7.
+  echo       The saved login no longer works; the app will ask you to sign in again.
+) else (
+  echo       Saved login works.
 )
 
 rem ---------------------------------------------------------------- 5. shortcut
@@ -108,9 +117,10 @@ echo    or double-click qexport-app.bat in this folder.
 echo    The old numbered menu is still there: "Qiscus Export (menu)".
 echo  =====================================================
 echo.
-choice /c YN /n /m "Open Qiscus Export now? [Y/N] "
-if errorlevel 2 goto :end
+if defined QEXPORT_NO_LAUNCH goto :end
+echo  Opening Qiscus Export...
 start "" "%VENV%\Scripts\pythonw.exe" -m qexport gui
+if not defined QEXPORT_UNATTENDED timeout /t 5 >nul
 goto :end
 
 rem ============================================================================

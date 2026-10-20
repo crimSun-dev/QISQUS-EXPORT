@@ -14,7 +14,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from qexport import __version__
-from qexport.store.checkpoint import CheckpointStore, Missing, from_iso
+from qexport.store.checkpoint import GONE_PREFIX, CheckpointStore, Missing, from_iso
 from qexport.transform.actions import (
     FORM_FIELD_LABELS, FORM_FIELDS, ActionType, lead_stage, merge_forms,
 )
@@ -287,7 +287,9 @@ class ExcelWriter:
                 reached / total if total else None, (j["total_read"] or 0) / total if total else None,
                 e.get("responders", 0), e.get("clicked", 0),
                 e.get("clicked", 0) / reached if reached else None,
-                e.get("forms", 0), e.get("questions", 0), j["logs_state"], j["job_id"],
+                e.get("forms", 0), e.get("questions", 0),
+                "not kept by Qiscus" if (j["last_error"] or "").startswith(GONE_PREFIX) else j["logs_state"],
+                j["job_id"],
             ])
             n_jobs += 1
             tick()
@@ -345,6 +347,7 @@ class ExcelWriter:
         # ---- Export Info
         skipped = store.skipped()
         run = store.run_info()
+        n_gone, newest_gone = store.jobs_gone()
         info = _Sheet(wb, "Export Info", ("Item", "Value"), cnt)
         rows: list[tuple[str, object]] = [
             ("Tool", f"qexport {__version__}"),
@@ -359,6 +362,9 @@ class ExcelWriter:
             ("Customer actions", n_actions),
             ("Broadcast jobs", n_jobs),
             ("Broadcast recipient rows", n_recipients if include_recipients else "not included"),
+            ("Campaigns Qiscus no longer keeps recipients for",
+             f"{n_gone:,} (created up to {newest_gone[:10]}; only their totals are available)"
+             if n_gone else 0),
             ("Truncated cells", cnt.truncated),
             ("Skipped / failed items", len(skipped)),
             ("", ""),

@@ -178,6 +178,8 @@ class Handler(BaseHTTPRequestHandler):
                     app.open_folder(str(body.get("which", "exports")))
                 case ["api", "clipboard"]:
                     result = {"ok": app.copy_text(str(body.get("text", "")))}
+                case ["api", "login", "browser"]:
+                    result = app.login_browser_start()
                 case ["api", "login", "start"]:
                     result = app.login_start()
                 case ["api", "login", "clipboard"]:
@@ -272,7 +274,7 @@ def main(root: Path | None = None, open_window: bool = True) -> int:
         return 1
     os.chdir(root)                         # .env and exports/ are relative to the install folder
     _setup_logging(exports)
-    app = GuiApp(root)
+    app = GuiApp(root, auto_signin=open_window)
     server: GuiServer | None = None
     try:
         app.start()

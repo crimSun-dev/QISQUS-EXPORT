@@ -153,12 +153,36 @@ function renderHeader(s) {
   const ls = s.login.state;
   const map = {
     ok: ["Login: OK", "ok"], checking: ["Login: checking…", ""], unknown: ["Login: checking…", ""],
-    missing: ["Log in to Qiscus", "warn"], failed: ["Login: not working", "error"],
-    expired: ["Login expired", "error"],
+    missing: ["Sign in to Qiscus", "warn"], failed: ["Login: not working", "error"],
+    expired: ["Login expired", "error"], signing_in: ["Signing in…", ""],
+    signin_failed: ["Sign in to Qiscus", "warn"],
   };
   const [label, cls] = map[ls] || map.unknown;
   setText(pill, label);
   pill.className = `pill ${cls}`;
+  renderSignin(s);
+}
+
+let prevLogin = null;
+function renderSignin(s) {
+  const ls = s.login.state;
+  const btn = $("login-browser");
+  btn.disabled = ls === "signing_in";
+  setText(btn, ls === "signing_in" ? "Waiting for you to sign in…" : (s.logged_in ? "Sign in again" : "Sign in to Qiscus"));
+  const status = $("login-status");
+  setText(status, ["signing_in", "signin_failed"].includes(ls) || (prevLogin === "signing_in") ? (s.login.message || "") : status.textContent);
+  status.className = `small ${ls === "signin_failed" ? "result error" : ls === "ok" && prevLogin === "signing_in" ? "result ok" : "muted"}`;
+  if (prevLogin === "signing_in" && ls !== "signing_in" && $("dlg-login").open) {
+    if (ls === "ok") {
+      setText(status, "Connected. You can close this and start downloading.");
+      const resumable = s.tasks.some((t) => t.outcome === "auth" && !["running", "paused", "pending"].includes(t.state));
+      $("login-continue").classList.toggle("hidden", !resumable);
+    } else if (ls === "failed") {
+      setText(status, "Signed in, but Qiscus refused the login. Make sure it's an admin account, then sign in again.");
+      status.className = "small result error";
+    }
+  }
+  prevLogin = ls;
 }
 
 let bannerKey = "";
@@ -166,8 +190,10 @@ function renderBanners(s) {
   const items = [];
   if (s.login.state === "expired" || s.login.state === "failed")
     items.push(["error", "The Qiscus login stopped working. Everything downloaded so far is safe.", "Refresh login", openLogin]);
-  else if (!s.logged_in)
-    items.push(["warn", "Connect qexport to your Qiscus admin account to download.", "Log in", openLogin]);
+  else if (!s.logged_in && s.login.state !== "signing_in")
+    items.push(["warn", "Connect qexport to your Qiscus admin account to download.", "Sign in", openLogin]);
+  else if (s.login.state === "signing_in")
+    items.push(["busy", "A Qiscus window is open. Sign in there; qexport connects by itself."]);
   if (s.blocked && s.logged_in && s.blocked !== s.verdict.detail) items.push(["busy", s.blocked]);
   if (s.integrity.state === "checking") items.push(["busy", "Checking the downloaded data file…"]);
   const key = JSON.stringify(items.map((i) => i.slice(0, 3)));
@@ -192,13 +218,14 @@ function renderStatus(s) {
   const st = s.store;
   const stats = [];
   if (st.exists) {
-    const fetchable = st.jobs_total - st.jobs_not_sent;
+    const fetchable = st.jobs_total - st.jobs_not_sent - (st.jobs_gone || 0);
     stats.push(["Conversations", `${num(st.rooms_done)} / ${num(st.rooms_total)}`,
       [st.rooms_pending && `${num(st.rooms_pending)} to go`, st.rooms_failed_total && `${num(st.rooms_failed_total)} failed`].filter(Boolean).join(" · ") || (st.rooms_listed ? "all downloaded" : "still listing")]);
     stats.push(["Messages", num(st.messages), ""]);
     stats.push(["Broadcast campaigns", `${num(st.jobs_done)} / ${num(fetchable)}`,
       [st.jobs_pending && `${num(st.jobs_pending)} to go`, st.jobs_failed_total && `${num(st.jobs_failed_total)} failed`,
-        st.jobs_not_sent && `${num(st.jobs_not_sent)} not sent yet`].filter(Boolean).join(" · ") || "all downloaded"]);
+        st.jobs_not_sent && `${num(st.jobs_not_sent)} not sent yet`,
+        st.jobs_gone && `${num(st.jobs_gone)} not kept by Qiscus`].filter(Boolean).join(" · ") || "all downloaded"]);
     stats.push(["Recipients", num(st.broadcast_logs), ""]);
     stats.push(["Saved on this PC", `${st.size_mb} MB`, st.last_completed ? `last full run ${when(st.last_completed)}` : ""]);
   }
@@ -455,6 +482,7 @@ function confirmBox(title, body, buttons) {
 
 function openLogin() {
   if (state && !$("login-snippet").value) $("login-snippet").value = state.login_snippet;
+  if (state && state.login.state !== "signing_in") $("login-status").textContent = "";
   $("login-result").textContent = "";
   $("login-result").className = "result";
   $("login-continue").classList.add("hidden");
@@ -571,6 +599,7 @@ $("btn-delete-old").addEventListener("click", async () => {
 });
 $("tab-activity").addEventListener("click", () => switchTab("activity"));
 $("tab-history").addEventListener("click", () => switchTab("history"));
+$("login-browser").addEventListener("click", () => act(() => api("/api/login/browser", {})));
 $("login-open").addEventListener("click", async () => {
   const r = await act(() => api("/api/login/start", {}));
   if (r) {

@@ -90,7 +90,14 @@
 <dialog id="dlg-login" class="dialog">
   <form method="dialog" class="dialog-body">
     <h3>Connect to Qiscus</h3>
-    <p class="muted">qexport uses the login of an <strong>admin</strong> account on the Qiscus dashboard. Three steps:</p>
+    <p class="muted">Sign in with an <strong>admin</strong> account. A Qiscus window opens; sign in there as usual
+      and qexport connects by itself. Your password goes only to Qiscus.</p>
+    <div class="signin">
+      <button class="btn primary" id="login-browser" type="button">Sign in to Qiscus</button>
+      <p id="login-status" class="muted small" aria-live="polite"></p>
+    </div>
+    <details id="login-manual">
+    <summary>Other way: copy the login from the Qiscus console</summary>
     <ol class="steps">
       <li>
         <strong>Open Qiscus and log in.</strong>
@@ -115,6 +122,7 @@
         </details>
       </li>
     </ol>
+    </details>
     <p id="login-result" class="result" aria-live="polite"></p>
     <div class="dialog-actions">
       <button class="btn hidden primary" id="login-continue" type="button">Continue downloads</button>
