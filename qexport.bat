@@ -40,11 +40,16 @@ echo   6. Check the Qiscus login
 echo   7. Set up / change the Qiscus login
 echo   8. Open the exports folder
 echo   9. Open the README
+echo   A. Open the Qiscus Export window (the easier way to do all of the above)
 echo   0. Exit
 echo.
-choice /c 1234567890 /n /m "Choose 0-9: "
+choice /c 1234567890A /n /m "Choose 0-9 or A: "
 set "OPT=%errorlevel%"
 if "%OPT%"=="10" goto :end
+if "%OPT%"=="11" (
+  start "" "%~dp0.venv\Scripts\pythonw.exe" -m qexport gui
+  goto :menu
+)
 if "%OPT%"=="1" call :run export
 if "%OPT%"=="2" call :run export --since-last-run
 if "%OPT%"=="3" call :run status

@@ -14,7 +14,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from qexport import __version__
-from qexport.store.checkpoint import CheckpointStore, from_iso
+from qexport.store.checkpoint import CheckpointStore, Missing, from_iso
 from qexport.transform.actions import (
     FORM_FIELD_LABELS, FORM_FIELDS, ActionType, lead_stage, merge_forms,
 )
@@ -96,6 +96,37 @@ class ExportReport:
     actions: int = 0
     broadcast_jobs: int = 0
     broadcast_recipients: int = 0
+    completeness: str = "Complete"      # Missing.describe(): "Complete" or "Partial (...)"
+
+    @property
+    def complete(self) -> bool:
+        return self.completeness == "Complete"
+
+
+class WorkbookLockedError(PermissionError):
+    """The finished workbook could not replace `target` (open in Excel). It is kept, complete,
+    at `partial`; finish_locked_workbook() retries the move once the file is closed."""
+
+    def __init__(self, partial: Path, target: Path, report: ExportReport) -> None:
+        super().__init__(f"{target.name} is open in another program (Excel?). Close it and retry; "
+                         f"the new workbook is waiting at {partial.name}")
+        self.partial, self.target, self.report = partial, target, report
+
+
+def finish_locked_workbook(err: WorkbookLockedError) -> ExportReport:
+    """Retry the final move. Raises WorkbookLockedError again while the target is still open."""
+    try:
+        os.replace(err.partial, err.target)
+    except PermissionError as e:
+        raise WorkbookLockedError(err.partial, err.target, err.report) from e
+    return err.report
+
+
+def expected_rows(store: CheckpointStore, include_recipients: bool = True) -> int:
+    """Roughly how many rows write() will produce, for a progress bar."""
+    c = store.counts()
+    return (2 * c["rooms"] + c["actions"] + c["jobs"] + c["messages"]
+            + (c["broadcast_logs"] if include_recipients else 0))
 
 
 @dataclass
@@ -177,10 +208,12 @@ class ExcelWriter:
 
     def write(self, store: CheckpointStore, out_path: Path, *,
               on_row: Callable[[int], None] | None = None,
-              include_recipients: bool = True) -> ExportReport:
+              include_recipients: bool = True, missing: Missing | None = None) -> ExportReport:
         """Sheets: Leads, Actions, Campaigns, Broadcast Recipients, Conversations, Messages,
-        Export Info. Writes to <out_path>.partial then os.replace() -> out_path (atomic)."""
+        Export Info. Writes to <out_path>.partial then os.replace() -> out_path (atomic).
+        Raises WorkbookLockedError if out_path is open in Excel."""
         t0 = time.monotonic()
+        missing = missing or store.missing()
         started = datetime.now(timezone.utc)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         partial = out_path.with_name(out_path.name + ".partial")
@@ -315,6 +348,7 @@ class ExcelWriter:
         info = _Sheet(wb, "Export Info", ("Item", "Value"), cnt)
         rows: list[tuple[str, object]] = [
             ("Tool", f"qexport {__version__}"),
+            ("Completeness", missing.describe()),
             ("App code", store.app_code),
             ("Run started (UTC)", run.get("started_at_utc")),
             ("Data as of (UTC)", run.get("last_completed_at_utc") or "incomplete run"),
@@ -356,9 +390,13 @@ class ExcelWriter:
 
         sheets = ["Leads", "Actions", "Campaigns", *recip_titles, "Conversations", *msgs.titles, "Export Info"]
         wb.save(partial)
-        os.replace(partial, out_path)   # PermissionError here = target open in Excel; .partial is kept
-        return ExportReport(
+        report = ExportReport(
             path=out_path, rooms=len(rooms), messages=n_msgs, truncated_cells=cnt.truncated,
             skipped_rooms=[f"{k} {i}: {e}" for k, i, e in skipped], sheets=sheets,
             duration_s=time.monotonic() - t0, actions=n_actions, broadcast_jobs=n_jobs,
-            broadcast_recipients=n_recipients)
+            broadcast_recipients=n_recipients, completeness=missing.describe())
+        try:
+            os.replace(partial, out_path)
+        except PermissionError as e:    # target open in Excel; the finished .partial is kept
+            raise WorkbookLockedError(partial, out_path, report) from e
+        return report

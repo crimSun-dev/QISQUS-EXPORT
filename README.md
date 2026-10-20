@@ -11,21 +11,54 @@ action layers asked for in the 2026-10-16 screen recording (see "What changed vs
 
 ## Install on a new PC (no command line)
 
-1. Copy `dist\qexport-1.0.2.zip` to the PC and unzip it somewhere permanent (e.g. `Documents\qexport`).
+1. Copy `dist\qexport-1.1.0.zip` to the PC and unzip it somewhere permanent (e.g. `Documents\qexport`).
 2. Double-click **`install.bat`**. It:
    - finds Python 3.11+, or installs Python 3.12 with `winget` (falls back to opening python.org);
    - creates a private environment in `.venv` and installs qexport into it;
    - runs `qexport setup`, which puts the console snippet on the clipboard, opens Qiscus, and reads
      the login values back once you've run the snippet (see `INSTALL.txt` for the click-by-click);
-   - adds a **Qiscus Export** desktop shortcut.
-3. Use the shortcut (or `qexport.bat`) for a numbered menu: download, update, progress, rebuild Excel,
-   retry failures, check/change login, open the exports folder.
+   - adds two desktop shortcuts: **Qiscus Export** (the window) and **Qiscus Export (menu)** (the
+     old numbered console menu, kept as a fallback).
+3. Use **Qiscus Export** (or `qexport-app.bat`). See "The window" below.
 
 Re-running `install.bat` repairs or updates the install and keeps `.env` and `exports\`.
 `qexport.bat <command>` runs any command directly, e.g. `qexport.bat status`.
 
 To build the zip after changing the code: `python tools/build_zip.py` (it never includes `.env`,
 `exports\` or `.venv`).
+
+## The window (`qexport gui`)
+
+One screen for everything the menu did, plus running things side by side:
+
+- **Is my data safe?** On opening, without going online, it reads the local data file and says in
+  one sentence what is downloaded and what is left (e.g. *All 6,826 conversations downloaded;
+  758 of 1,747 sent broadcast campaigns downloaded*), with the one button that fits: Continue
+  download, Build Excel now, or Retry failed items. If the last session was cut off (power cut,
+  killed window), it runs SQLite's integrity check before allowing new downloads.
+- **Tasks.** Downloading conversations, downloading broadcast campaigns and building the Excel file
+  are separate tasks that can run at the same time, each with progress, speed, time left, and
+  Pause / Resume / Cancel. Pause and cancel take effect after the item in progress, so nothing
+  half-saved is left behind. Conversations and broadcasts share the Qiscus server's request limit,
+  so running both doesn't go faster than one would.
+- **Excel files.** Every workbook in `exports\`, newest first, marked **Complete** or **Partial** (with
+  what's missing), with counts, Open, Show in folder, Copy path and Delete (to the Recycle Bin).
+  *Delete old partial files* never removes a Complete file, the newest file, or the fullest one.
+- **Automatic Excel files.** One when conversations finish, one when broadcasts finish, and a
+  partial one when a download stops early (login expired, network down, cancelled). Builds use a
+  snapshot of the data, so they never slow down or block a download that's running.
+- **Login.** A three-step guide (open Qiscus → run the snippet → read it back), the login status
+  at the top, and, when a login expires mid-download, *Refresh login* then *Continue downloads*.
+- **Options** in plain words (what to download, campaign start date, recipients sheet, Excel
+  folder; request speeds under Advanced), **Copy diagnostics** (no tokens or phone numbers), an
+  activity log and a history of past runs.
+
+It runs locally: a small web page served by qexport on `127.0.0.1` and opened as an app window in
+Edge (or Chrome, or the default browser). Only one copy runs per folder; opening it again brings
+the existing window forward. Closing the window while something runs offers *keep going in the
+background* or *stop safely*; with no window and nothing running, it stops by itself. While a console
+run (`qexport export`) is using the data, the window shows its progress but won't start downloads.
+Log file: `exports\qexport_gui.log`.
 
 ## Install (developers)
 
@@ -82,6 +115,12 @@ Exit codes: `0` complete · `3` partial (some items skipped, listed in *Export I
 
 Downloaded data lives in `exports/qexport_<app>.sqlite3`. Every room/campaign is committed in one
 transaction, so a crash loses at most the item in flight.
+
+`export` writes a workbook as soon as conversations are done (before the long broadcast phase) and
+again at the end; if it stops early it writes a partial one from what was downloaded. Workbooks
+whose data is incomplete are named `…_PARTIAL.xlsx`, and *Export Info → Completeness* says what is
+missing. Campaigns that haven't been sent yet don't count as missing. If the target file is open in
+Excel, the finished workbook waits as `.partial` and qexport asks you to close Excel and retry.
 
 ## The workbook
 

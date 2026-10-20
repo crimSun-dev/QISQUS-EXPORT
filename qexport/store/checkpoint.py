@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
+import time
+import uuid
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from importlib import resources
@@ -18,6 +22,7 @@ from qexport.transform.normalize import (
 )
 
 SCHEMA_VERSION = 2
+BUSY_TIMEOUT_MS = 30_000   # a writer waits this long for another task's transaction before failing
 _NO_LOGS_YET = tuple(ep.JOB_STATUS[s] for s in sorted(ep.JOB_NO_LOGS_YET_STATUSES))
 
 
@@ -45,6 +50,43 @@ class Progress:
     jobs_skipped: int = 0
     broadcast_logs: int = 0
     broadcast_enumeration_done: bool = False
+
+
+@dataclass(frozen=True)
+class Missing:
+    """What a workbook built from this store would lack. Campaigns that have not started sending
+    (queued/scheduled/preparing) and campaigns outside --broadcasts-since are not counted: they
+    have no recipient log to download yet, or were left out on purpose."""
+    rooms_listing_incomplete: bool = False
+    rooms_pending: int = 0
+    rooms_failed: int = 0           # failed + skipped
+    jobs_listing_incomplete: bool = False
+    jobs_pending: int = 0
+    jobs_failed: int = 0            # failed + skipped
+
+    @property
+    def complete(self) -> bool:
+        return not (self.rooms_listing_incomplete or self.rooms_pending or self.rooms_failed
+                    or self.jobs_listing_incomplete or self.jobs_pending or self.jobs_failed)
+
+    def describe(self) -> str:
+        """'Complete', or 'Partial (1,359 broadcast campaigns not downloaded, ...)'."""
+        if self.complete:
+            return "Complete"
+        parts = []
+        if self.rooms_listing_incomplete:
+            parts.append("conversation list not finished")
+        if self.rooms_pending:
+            parts.append(f"{self.rooms_pending:,} conversations not downloaded")
+        if self.rooms_failed:
+            parts.append(f"{self.rooms_failed:,} conversations failed")
+        if self.jobs_listing_incomplete:
+            parts.append("broadcast campaign list not finished")
+        if self.jobs_pending:
+            parts.append(f"{self.jobs_pending:,} broadcast campaigns not downloaded")
+        if self.jobs_failed:
+            parts.append(f"{self.jobs_failed:,} broadcast campaigns failed")
+        return f"Partial ({', '.join(parts)})"
 
 
 @dataclass(frozen=True)
@@ -125,22 +167,31 @@ def _lock_fd(fd: int) -> None:
 
 
 class CheckpointStore:
+    """One connection per instance. Several instances (one per task thread) may share a file:
+    WAL lets readers run during a write, and writers queue behind each other for BUSY_TIMEOUT_MS.
+    An instance may be handed between threads, but never used by two threads at once."""
+
     def __init__(self, path: Path, app_code: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._db = sqlite3.connect(path, isolation_level=None)   # explicit BEGIN/COMMIT only
+        self._db = sqlite3.connect(path, isolation_level=None,   # explicit BEGIN/COMMIT only
+                                   timeout=BUSY_TIMEOUT_MS / 1000, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA foreign_keys=ON")
-        self._db.execute("PRAGMA synchronous=NORMAL")
-        schema = resources.files("qexport.store").joinpath("schema.sql").read_text(encoding="utf-8")
-        self._db.executescript(schema)
-        self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        row = self._db.execute("SELECT app_code FROM run WHERE id=1").fetchone()
-        if row is None:
-            self._db.execute("INSERT INTO run (id, app_code, started_at_utc) VALUES (1, ?, ?)",
-                             (app_code, iso(datetime.now(timezone.utc))))
-        elif row["app_code"] != app_code:
+        self._db.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        # Switching a new file to WAL fails at once (no busy wait) if another connection is doing
+        # the same, so tasks opening the store together take turns here.
+        with _OPEN_LOCK:
+            _retry_busy(lambda: self._db.execute("PRAGMA journal_mode=WAL"))
+            self._db.execute("PRAGMA foreign_keys=ON")
+            self._db.execute("PRAGMA synchronous=NORMAL")
+            schema = resources.files("qexport.store").joinpath("schema.sql").read_text(encoding="utf-8")
+            self._db.executescript(schema)
+            self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            row = self._db.execute("SELECT app_code FROM run WHERE id=1").fetchone()
+            if row is None:
+                self._db.execute("INSERT INTO run (id, app_code, started_at_utc) VALUES (1, ?, ?)",
+                                 (app_code, iso(datetime.now(timezone.utc))))
+        if row is not None and row["app_code"] != app_code:
             self._db.close()
             raise StoreAppMismatchError(
                 f"{path} belongs to app {row['app_code']!r}, not {app_code!r}")
@@ -535,8 +586,106 @@ class CheckpointStore:
             broadcast_logs=c["broadcast_logs"],
             broadcast_enumeration_done=bool(run["broadcast_enumeration_done"]))
 
+    def missing(self, since: date | None = None) -> Missing:
+        """Counts behind the Complete / Partial label of a workbook built from this store."""
+        run = self._run()
+        rooms = dict(self._db.execute(
+            "SELECT fetch_state, COUNT(*) FROM rooms GROUP BY fetch_state").fetchall())
+        sql = ("SELECT logs_state, COUNT(*) FROM broadcast_jobs "
+               f"WHERE status NOT IN ({','.join('?' * len(_NO_LOGS_YET))})")
+        params: tuple = _NO_LOGS_YET
+        if since is not None:
+            sql += " AND created_at_utc >= ?"
+            params += (since.isoformat(),)
+        jobs = dict(self._db.execute(sql + " GROUP BY logs_state", params).fetchall())
+        return Missing(
+            rooms_listing_incomplete=not run["enumeration_done"],
+            rooms_pending=rooms.get("pending", 0),
+            rooms_failed=rooms.get("failed", 0) + rooms.get("skipped", 0),
+            jobs_listing_incomplete=not run["broadcast_enumeration_done"],
+            jobs_pending=jobs.get("pending", 0),
+            jobs_failed=jobs.get("failed", 0) + jobs.get("skipped", 0))
+
+    def jobs_not_sent_yet(self) -> int:
+        """Campaigns still queued / scheduled / preparing: no recipient log exists yet."""
+        return self._db.execute(
+            f"SELECT COUNT(*) FROM broadcast_jobs WHERE status IN ({','.join('?' * len(_NO_LOGS_YET))})",
+            _NO_LOGS_YET).fetchone()[0]
+
+    def integrity_check(self) -> list[str]:
+        """SQLite's own consistency check: ['ok'] when the file is healthy."""
+        return [r[0] for r in self._db.execute("PRAGMA integrity_check").fetchall()]
+
+    # ------------------------------------------------------------------ snapshots
+
+    def create_snapshot(self, dest: Path) -> Path:
+        """Point-in-time copy of the whole store at `dest`, via SQLite's online backup.
+
+        Copied in one step, so it is one consistent read: in WAL mode that never blocks the
+        writers in other connections (a stepped backup would restart on every write instead)."""
+        dest.unlink(missing_ok=True)
+        target = sqlite3.connect(dest)
+        try:
+            self._db.backup(target)
+        finally:
+            target.close()
+        return dest
+
+    @contextmanager
+    def snapshot(self) -> Iterator[CheckpointStore]:
+        """A throwaway CheckpointStore over a fresh snapshot, deleted afterwards (even on error).
+        Work that writes (deriving actions) happens there, never in the live store."""
+        _remove_stale_snapshots(self.path.parent)
+        dest = self.path.with_name(f"{_SNAPSHOT_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:8]}.sqlite3")
+        snap: CheckpointStore | None = None
+        try:
+            self.create_snapshot(dest)
+            snap = CheckpointStore(dest, self.app_code)
+            yield snap
+        finally:
+            if snap is not None:
+                snap.close()
+            _remove_snapshot_files(dest)
+
     def close(self) -> None:
         self._db.close()
+
+
+_OPEN_LOCK = threading.Lock()
+
+
+def _retry_busy(fn, attempts: int = 50, wait_s: float = 0.1):
+    """For the few statements SQLite won't busy-wait on (journal mode change)."""
+    for i in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or i == attempts - 1:
+                raise
+            time.sleep(wait_s)
+
+
+_SNAPSHOT_PREFIX = ".snapshot-"
+_STALE_SNAPSHOT_S = 6 * 3600
+
+
+def _remove_snapshot_files(path: Path) -> None:
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            Path(str(path) + suffix).unlink(missing_ok=True)
+        except OSError:                  # still open elsewhere; the stale sweep gets it later
+            pass
+
+
+def _remove_stale_snapshots(folder: Path) -> None:
+    """Snapshots left by a run that died mid-build (power cut) are ~the size of the store."""
+    now = time.time()
+    for p in folder.glob(f"{_SNAPSHOT_PREFIX}*.sqlite3"):
+        try:
+            if now - p.stat().st_mtime > _STALE_SNAPSHOT_S:
+                _remove_snapshot_files(p)
+        except OSError:
+            pass
 
 
 class _Tx:

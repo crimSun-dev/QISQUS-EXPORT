@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qiscus Export</title>
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <img src="icon.svg" alt="" width="28" height="28">
+    <div>
+      <h1>Qiscus Export</h1>
+      <p class="sub" id="appcode">Conversations, broadcasts and replies → Excel</p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <button class="pill" id="login-pill" type="button" title="Qiscus login">Login: checking…</button>
+    <button class="btn ghost" id="btn-options" type="button">Options</button>
+    <button class="btn ghost" id="btn-close" type="button">Close app</button>
+  </div>
+</header>
+
+<main>
+  <div id="banners" aria-live="polite"></div>
+
+  <section class="card status" id="status" aria-labelledby="verdict-headline">
+    <div class="status-text">
+      <p class="eyebrow">Is my data safe?</p>
+      <h2 id="verdict-headline" aria-live="polite">Loading…</h2>
+      <p id="verdict-detail" class="detail"></p>
+      <ul id="verdict-notes" class="notes"></ul>
+    </div>
+    <dl class="stats" id="stats"></dl>
+    <div class="actions" id="primary-actions">
+      <button class="btn primary" id="btn-download" type="button">Download everything</button>
+      <button class="btn" id="btn-update" type="button" title="Only conversations and campaigns with new activity">Update new activity</button>
+      <button class="btn" id="btn-build" type="button" title="Make an Excel file from what's downloaded, right now">Build Excel now</button>
+      <button class="btn hidden" id="btn-retry" type="button">Retry failed items</button>
+    </div>
+    <p class="health" id="health"></p>
+  </section>
+
+  <div class="columns">
+    <section class="card" aria-labelledby="tasks-title">
+      <div class="card-head">
+        <h3 id="tasks-title">Tasks</h3>
+        <span class="muted small" id="tasks-summary"></span>
+      </div>
+      <div id="tasks" class="tasks"></div>
+      <p class="empty" id="tasks-empty">Nothing running. Downloads and Excel builds show up here with their progress.</p>
+    </section>
+
+    <section class="card" aria-labelledby="files-title">
+      <div class="card-head">
+        <h3 id="files-title">Excel files</h3>
+        <div class="head-actions">
+          <button class="btn small ghost" id="btn-open-folder" type="button">Open folder</button>
+          <button class="btn small ghost" id="btn-delete-old" type="button">Delete old partial files</button>
+        </div>
+      </div>
+      <div id="files" class="files"></div>
+      <p class="empty" id="files-empty">No Excel files yet. Press Build Excel now, or one is made automatically when a download finishes.</p>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="log-title">
+    <div class="card-head">
+      <h3 id="log-title">What happened</h3>
+      <div class="tabs" role="tablist">
+        <button role="tab" class="tab active" id="tab-activity" aria-selected="true" type="button">Activity</button>
+        <button role="tab" class="tab" id="tab-history" aria-selected="false" type="button">Past runs</button>
+      </div>
+    </div>
+    <ol id="activity" class="log"></ol>
+    <ol id="history" class="log hidden"></ol>
+  </section>
+
+  <footer class="footer">
+    <button class="btn small ghost" id="btn-diagnostics" type="button">Copy diagnostics</button>
+    <button class="btn small ghost" id="btn-store-folder" type="button">Show data file</button>
+    <span class="muted small" id="version"></span>
+  </footer>
+</main>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<dialog id="dlg-login" class="dialog">
+  <form method="dialog" class="dialog-body">
+    <h3>Connect to Qiscus</h3>
+    <p class="muted">qexport uses the login of an <strong>admin</strong> account on the Qiscus dashboard. Three steps:</p>
+    <ol class="steps">
+      <li>
+        <strong>Open Qiscus and log in.</strong>
+        <p>Use Chrome or Edge, with an admin account.</p>
+        <button class="btn" id="login-open" type="button">Open Qiscus</button>
+      </li>
+      <li>
+        <strong>Run the snippet in the Console.</strong>
+        <p>Press <kbd>F12</kbd>, open the <em>Console</em> tab, paste (<kbd>Ctrl</kbd>+<kbd>V</kbd>) and press <kbd>Enter</kbd>.
+        The first time, Chrome may ask you to type <code>allow pasting</code> first. The snippet is already on your clipboard;
+        if not, copy it here:</p>
+        <textarea id="login-snippet" readonly rows="3" spellcheck="false" aria-label="Console snippet"></textarea>
+        <button class="btn small" id="login-copy-snippet" type="button">Copy snippet</button>
+      </li>
+      <li>
+        <strong>Come back here when the Console says “Copied!”.</strong>
+        <button class="btn primary" id="login-read" type="button">Read login from clipboard</button>
+        <details>
+          <summary>Or paste the Console output yourself</summary>
+          <textarea id="login-paste" rows="4" spellcheck="false" placeholder="QISCUS_APP_CODE=…" aria-label="Console output"></textarea>
+          <button class="btn small" id="login-use-paste" type="button">Use pasted text</button>
+        </details>
+      </li>
+    </ol>
+    <p id="login-result" class="result" aria-live="polite"></p>
+    <div class="dialog-actions">
+      <button class="btn hidden primary" id="login-continue" type="button">Continue downloads</button>
+      <button class="btn ghost" value="close">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-options" class="dialog">
+  <form method="dialog" class="dialog-body" id="options-form">
+    <h3>Options</h3>
+    <fieldset>
+      <legend>What to download</legend>
+      <label class="check"><input type="checkbox" name="include_messages"> Conversations and messages</label>
+      <label class="check"><input type="checkbox" name="include_broadcasts"> Broadcast campaigns and who received them</label>
+      <label class="field">Only campaigns created on or after
+        <input type="date" name="broadcasts_since"> <span class="muted small">Leave empty for all campaigns.</span></label>
+    </fieldset>
+    <fieldset>
+      <legend>Excel file</legend>
+      <label class="check"><input type="checkbox" name="auto_workbook"> Make an Excel file automatically when a download finishes or stops</label>
+      <label class="check"><input type="checkbox" name="include_recipients"> Include the large “Broadcast Recipients” sheet</label>
+      <label class="field">Save Excel files in
+        <input type="text" name="workbook_dir" placeholder="the exports folder" spellcheck="false"></label>
+    </fieldset>
+    <details class="advanced">
+      <summary>Advanced: request speed</summary>
+      <p class="warn-text">Faster than the defaults can make Qiscus block the download for a while. Only change these if support asks you to.</p>
+      <label class="field">Conversation list (per second) <input type="number" name="rooms_rps" step="0.1" min="0.2" max="5"></label>
+      <label class="field">Messages (per second) <input type="number" name="messages_rps" step="0.1" min="0.2" max="5"></label>
+      <label class="field">Broadcast logs (per second) <input type="number" name="broadcast_rps" step="0.1" min="0.2" max="5"></label>
+    </details>
+    <p id="options-error" class="result error" aria-live="polite"></p>
+    <div class="dialog-actions">
+      <button class="btn ghost" value="cancel" type="submit">Cancel</button>
+      <button class="btn primary" id="options-save" type="button">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-confirm" class="dialog">
+  <form method="dialog" class="dialog-body">
+    <h3 id="confirm-title"></h3>
+    <div id="confirm-body"></div>
+    <div class="dialog-actions" id="confirm-actions"></div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

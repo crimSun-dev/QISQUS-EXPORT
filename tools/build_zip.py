@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INCLUDE = ["qexport", "tests", "tools", "pyproject.toml", "README.md", "TDD-qiscus-chat-exporter.md",
-           ".env.example", ".gitignore", "install.bat", "qexport.bat", "INSTALL.txt"]
+           ".env.example", ".gitignore", "install.bat", "qexport.bat", "qexport-app.bat", "INSTALL.txt"]
 EXCLUDE_PARTS = {"__pycache__", ".pytest_cache", ".venv", "exports", "dist", "build"}
 EXCLUDE_SUFFIXES = {".pyc", ".sqlite3", ".lock", ".partial", ".xlsx"}
 FORBIDDEN_NAMES = {".env"}

@@ -88,12 +88,13 @@ if defined QEXPORT_NO_SHORTCUT (
   echo [5/5] Desktop shortcut skipped.
   goto :done
 )
-echo [5/5] Creating a desktop shortcut "Qiscus Export"...
+echo [5/5] Creating desktop shortcuts "Qiscus Export" and "Qiscus Export (menu)"...
 rem The folder path can contain apostrophes, so it reaches PowerShell through an env var.
+rem "Qiscus Export" opens the window (pythonw: no console); "(menu)" is the console fallback.
 set "QX_DIR=%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=$env:QX_DIR; $s=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Qiscus Export.lnk')); $s.TargetPath=(Join-Path $d 'qexport.bat'); $s.WorkingDirectory=$d; $s.IconLocation=$env:SystemRoot + '\System32\imageres.dll,184'; $s.Save()" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=$env:QX_DIR; $desk=[Environment]::GetFolderPath('Desktop'); $sh=New-Object -ComObject WScript.Shell; $icon=$env:SystemRoot + '\System32\imageres.dll,184'; $s=$sh.CreateShortcut((Join-Path $desk 'Qiscus Export.lnk')); $s.TargetPath=(Join-Path $d '.venv\Scripts\pythonw.exe'); $s.Arguments='-m qexport gui'; $s.WorkingDirectory=$d; $s.IconLocation=$icon; $s.Description='Download Qiscus conversations and broadcasts to Excel'; $s.Save(); $m=$sh.CreateShortcut((Join-Path $desk 'Qiscus Export (menu).lnk')); $m.TargetPath=(Join-Path $d 'qexport.bat'); $m.WorkingDirectory=$d; $m.IconLocation=$icon; $m.Save()" >nul 2>&1
 if errorlevel 1 (
-  echo       Shortcut skipped. Start the tool by double-clicking qexport.bat in this folder.
+  echo       Shortcuts skipped. Start the tool by double-clicking qexport-app.bat in this folder.
 ) else (
   echo       Done.
 )
@@ -103,12 +104,13 @@ echo.
 echo  =====================================================
 echo    Setup complete.
 echo    Start it from the "Qiscus Export" desktop icon,
-echo    or double-click qexport.bat in this folder.
+echo    or double-click qexport-app.bat in this folder.
+echo    The old numbered menu is still there: "Qiscus Export (menu)".
 echo  =====================================================
 echo.
-choice /c YN /n /m "Open the menu now? [Y/N] "
+choice /c YN /n /m "Open Qiscus Export now? [Y/N] "
 if errorlevel 2 goto :end
-call "%~dp0qexport.bat"
+start "" "%VENV%\Scripts\pythonw.exe" -m qexport gui
 goto :end
 
 rem ============================================================================

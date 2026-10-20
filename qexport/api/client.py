@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -83,7 +84,8 @@ class SystemClock:
 
 
 class RateLimiter:
-    """Token bucket. capacity=1 -> strict spacing; never bursts."""
+    """Token bucket. capacity=1 -> strict spacing; never bursts. Thread-safe: each caller
+    reserves the next slot under the lock, then sleeps outside it."""
 
     def __init__(self, rate_per_s: float, clock: Clock) -> None:
         if rate_per_s <= 0:
@@ -92,23 +94,76 @@ class RateLimiter:
         self._rate = rate_per_s
         self._clock = clock
         self._next_at: float | None = None
+        self._lock = threading.Lock()
 
     def acquire(self) -> None:
-        now = self._clock.monotonic()
-        if self._next_at is not None and now < self._next_at:
-            self._clock.sleep(self._next_at - now)
-            now = self._next_at
-        self._next_at = now + 1.0 / self._rate
+        with self._lock:
+            now = self._clock.monotonic()
+            at = now if self._next_at is None or now >= self._next_at else self._next_at
+            self._next_at = at + 1.0 / self._rate
+        if at > now:
+            self._clock.sleep(at - now)
 
     def penalize(self, factor: float = 0.5, floor_rps: float = 0.2) -> None:
-        self._rate = max(floor_rps, self._rate * factor)
+        """Slow down, and push the next slot back by one new interval: every caller waits."""
+        with self._lock:
+            self._rate = max(floor_rps, self._rate * factor)
+            base = max(self._next_at or 0.0, self._clock.monotonic())
+            self._next_at = base + 1.0 / self._rate
 
     def recover(self, step: float = 1.05) -> None:
-        self._rate = min(self._initial, self._rate * step)
+        with self._lock:
+            self._rate = min(self._initial, self._rate * step)
 
     @property
     def current_rate(self) -> float:
         return self._rate
+
+
+class CoordinatedRateLimiter:
+    """Per-endpoint limiter plus the limiter of the host it calls. Endpoints on one host share
+    that host's limiter, so tasks running side by side never add up past the host's ceiling;
+    a 429 slows the host for everyone."""
+
+    def __init__(self, own: RateLimiter, host: RateLimiter) -> None:
+        self.own, self.host = own, host
+
+    def acquire(self) -> None:
+        self.own.acquire()
+        self.host.acquire()
+
+    def penalize(self) -> None:
+        self.own.penalize()
+        self.host.penalize()
+
+    def recover(self) -> None:
+        self.own.recover()
+        self.host.recover()
+
+    @property
+    def current_rate(self) -> float:
+        return min(self.own.current_rate, self.host.current_rate)
+
+
+@dataclass
+class Limiters:
+    """Every limiter qexport uses. Build once and pass to each QiscusClient that runs at the same
+    time (one per task), so they all draw from the same buckets.
+
+    rooms + broadcasts call multichannel-api.qiscus.com; messages call api3.qiscus.com."""
+    rooms: CoordinatedRateLimiter
+    messages: CoordinatedRateLimiter
+    broadcast: CoordinatedRateLimiter
+
+    @classmethod
+    def from_settings(cls, settings: Settings, clock: Clock | None = None) -> Limiters:
+        clock = clock or SystemClock()
+        omni = RateLimiter(max(settings.rooms_rps, settings.broadcast_rps), clock)
+        sdk = RateLimiter(settings.messages_rps, clock)
+        return cls(
+            rooms=CoordinatedRateLimiter(RateLimiter(settings.rooms_rps, clock), omni),
+            messages=CoordinatedRateLimiter(RateLimiter(settings.messages_rps, clock), sdk),
+            broadcast=CoordinatedRateLimiter(RateLimiter(settings.broadcast_rps, clock), omni))
 
 
 class _Transient(Exception):
@@ -126,22 +181,27 @@ class ClientStats:
 
 
 class QiscusClient:
+    """Thread-safe: one client may serve several tasks. Tasks that each need their own client
+    (separate credentials refresh, separate close) pass the same `limiters` instead."""
+
     def __init__(self, settings: Settings, http: httpx.Client | None = None,
-                 clock: Clock | None = None) -> None:
+                 clock: Clock | None = None, limiters: Limiters | None = None) -> None:
         self._s = settings
         self._clock = clock or SystemClock()
         self._http = http or httpx.Client(timeout=settings.request_timeout_s)
         self._omni_headers = ep.omni_headers(settings.app_code, settings.admin_token.get_secret_value())
         self._sdk_headers = ep.sdk_headers(settings.app_code, settings.sdk_user_id,
                                            settings.sdk_token.get_secret_value())
-        self.rooms_limiter = RateLimiter(settings.rooms_rps, self._clock)
-        self.messages_limiter = RateLimiter(settings.messages_rps, self._clock)
-        self.broadcast_limiter = RateLimiter(settings.broadcast_rps, self._clock)
+        lim = limiters or Limiters.from_settings(settings, self._clock)
+        self.rooms_limiter = lim.rooms
+        self.messages_limiter = lim.messages
+        self.broadcast_limiter = lim.broadcast
         self.stats = ClientStats()
+        self._stats_lock = threading.Lock()
 
     # ------------------------------------------------------------------ transport
 
-    def _send(self, method: str, url: str, limiter: RateLimiter, label: str,
+    def _send(self, method: str, url: str, limiter: CoordinatedRateLimiter, label: str,
               **kw) -> httpx.Response:
         retryer = Retrying(
             retry=retry_if_exception_type(_Transient),
@@ -155,14 +215,15 @@ class QiscusClient:
             for attempt in retryer:
                 with attempt:
                     limiter.acquire()
-                    self.stats.requests += 1
-                    self.stats.by_endpoint[label] = self.stats.by_endpoint.get(label, 0) + 1
+                    with self._stats_lock:
+                        self.stats.requests += 1
+                        self.stats.by_endpoint[label] = self.stats.by_endpoint.get(label, 0) + 1
                     try:
                         resp = self._http.request(method, url, **kw)
                     except httpx.TransportError as e:   # timeouts, connect errors, resets
                         raise _Transient(type(e).__name__) from e
                     if resp.status_code == 429:
-                        self.stats.http_429 += 1
+                        self._bump("http_429")
                         limiter.penalize()
                         raise _Transient("HTTP 429", is_429=True)
                     if resp.status_code >= 500:
@@ -177,7 +238,8 @@ class QiscusClient:
         raise AssertionError("unreachable")
 
     def _bump(self, name: str) -> None:
-        setattr(self.stats, name, getattr(self.stats, name) + 1)
+        with self._stats_lock:
+            setattr(self.stats, name, getattr(self.stats, name) + 1)
 
     @staticmethod
     def _json(resp: httpx.Response, endpoint: str) -> dict:

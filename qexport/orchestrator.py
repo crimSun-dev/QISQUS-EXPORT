@@ -14,7 +14,7 @@ from qexport.config import Settings
 from qexport.extract.broadcasts import BroadcastEnumerator, BroadcastLogFetcher
 from qexport.extract.messages import CursorLoopError, MessageFetcher
 from qexport.extract.rooms import RoomEnumerator
-from qexport.load.excel import ExcelWriter, ExportReport
+from qexport.load.excel import ExcelWriter, ExportReport, expected_rows
 from qexport.store.checkpoint import CheckpointStore, iso
 from qexport.transform.actions import ActionRecord, derive_actions
 from qexport.transform.normalize import normalize_phone
@@ -28,14 +28,18 @@ _CIRCUIT_BREAKER = 15   # this many consecutive item failures of one kind -> som
 
 
 class ProgressSink(Protocol):
+    """advance() runs after each committed item or page, so a sink may block there (pause) or
+    raise RunCancelled (cancel) without losing work."""
     def phase(self, name: str, total: int | None) -> None: ...
     def advance(self, n: int = 1, **info: object) -> None: ...
+    def item(self, label: str) -> None: ...
     def warn(self, msg: str) -> None: ...
 
 
 class NullProgress:
     def phase(self, name: str, total: int | None) -> None: ...
     def advance(self, n: int = 1, **info: object) -> None: ...
+    def item(self, label: str) -> None: ...
     def warn(self, msg: str) -> None: ...
 
 
@@ -45,11 +49,16 @@ class RunAborted(Exception):
         self.exit_code = exit_code
 
 
+class RunCancelled(Exception):
+    """Raised by a ProgressSink when the user cancels. Committed rooms/jobs stay committed."""
+
+
 @dataclass(frozen=True)
 class RunResult:
     exit_code: int
-    report: ExportReport | None
+    report: ExportReport | None        # the last workbook written, if any
     message: str = ""
+    reports: tuple[ExportReport, ...] = ()   # every workbook this run wrote, oldest first
 
 
 def rebuild_actions(store: CheckpointStore, window_days: int) -> int:
@@ -71,6 +80,26 @@ def rebuild_actions(store: CheckpointStore, window_days: int) -> int:
     return store.replace_actions(list(gen()))
 
 
+def build_workbook(store: CheckpointStore, settings: Settings, writer: ExcelWriter,
+                   progress: ProgressSink | None = None, out_path: Path | None = None,
+                   include_recipients: bool = True) -> ExportReport:
+    """Snapshot the store, derive actions in the snapshot, write the workbook from it.
+
+    The live store is only read (for the snapshot), so this can run while downloads commit.
+    Without out_path the file is named after the data's completeness (…_PARTIAL.xlsx)."""
+    p = progress or NullProgress()
+    p.phase("Taking a snapshot of the downloaded data", None)
+    with store.snapshot() as snap:
+        p.phase("Deriving customer actions", None)
+        n = rebuild_actions(snap, settings.attribution_window_days)
+        p.advance(0, actions=n)
+        missing = snap.missing(settings.broadcasts_since)
+        path = out_path or default_out_path(settings, partial=not missing.complete)
+        p.phase("Writing workbook", expected_rows(snap, include_recipients))
+        return writer.write(snap, path, on_row=lambda k: p.advance(1000),
+                            include_recipients=include_recipients, missing=missing)
+
+
 class ExportOrchestrator:
     def __init__(self, settings: Settings, client: QiscusClient, store: CheckpointStore,
                  enumerator: RoomEnumerator, fetcher: MessageFetcher, writer: ExcelWriter,
@@ -88,7 +117,13 @@ class ExportOrchestrator:
             include_messages: bool = True, include_broadcasts: bool = True,
             include_recipients_sheet: bool = True, out_path: Path | None = None) -> RunResult:
         """1) enumerate rooms + broadcast jobs  2) fetch every room's messages
-        3) fetch every job's recipient log  4) derive actions  5) write xlsx."""
+        3) fetch every job's recipient log  4) derive actions  5) write xlsx.
+
+        With write_xlsx, a workbook is also written as soon as conversations are done (when
+        broadcast logs are still to come) and when the run stops early, so finished downloads
+        are never stuck in the store waiting for the slow broadcast phase."""
+        reports: list[ExportReport] = []
+        stop: RunResult | None = None
         try:
             if include_messages:
                 self._enumerate_rooms(since_last_run)
@@ -97,46 +132,73 @@ class ExportOrchestrator:
             if include_messages:
                 self._fetch_rooms(limit_rooms)
             if include_broadcasts and self._log_fetch is not None:
+                if write_xlsx and include_messages and self._broadcast_work_left(limit_jobs):
+                    self._write_quietly(reports, out_path, include_recipients_sheet,
+                                        "Conversations finished; writing a workbook before broadcasts")
                 self._fetch_broadcast_logs(limit_jobs)
         except AuthError as e:
-            return RunResult(EXIT_AUTH, None,
+            stop = RunResult(EXIT_AUTH, None,
                              f"{e}. The dashboard token probably expired: refresh .env and run `qexport resume`.")
         except RateLimitExhausted as e:
-            return RunResult(EXIT_RATE_LIMIT, None,
+            stop = RunResult(EXIT_RATE_LIMIT, None,
                              f"{e}. Progress is saved; wait a few minutes, then `qexport resume` "
                              "with lower --rooms-rps / --messages-rps.")
         except NetworkExhausted as e:
-            return RunResult(EXIT_NETWORK, None,
+            stop = RunResult(EXIT_NETWORK, None,
                              f"{e}. Could not reach Qiscus. Progress is saved; check the internet "
                              "connection, then `qexport resume`.")
         except (SchemaDriftError, ApiRequestError) as e:
-            return RunResult(EXIT_SCHEMA, None, f"{e}. Progress is saved; `qexport resume` once this is fixed.")
+            stop = RunResult(EXIT_SCHEMA, None, f"{e}. Progress is saved; `qexport resume` once this is fixed.")
         except RunAborted as e:
-            return RunResult(e.exit_code, None, str(e))
+            stop = RunResult(e.exit_code, None, str(e))
+        except RunCancelled:
+            stop = RunResult(EXIT_INTERRUPTED, None, "Cancelled. Everything downloaded so far is saved.")
         except KeyboardInterrupt:
-            return RunResult(EXIT_INTERRUPTED, None, "Interrupted. Progress is saved; run `qexport resume`.")
+            stop = RunResult(EXIT_INTERRUPTED, None, "Interrupted. Progress is saved; run `qexport resume`.")
+
+        if stop is not None:
+            if write_xlsx and self._has_data():
+                self._write_quietly(reports, out_path, include_recipients_sheet,
+                                    "Run stopped early; writing a partial workbook of what was downloaded "
+                                    "(Ctrl+C again to skip)")
+            return RunResult(stop.exit_code, reports[-1] if reports else None, stop.message, tuple(reports))
 
         if limit_rooms is None and limit_jobs is None:
             self._store.mark_run_completed()
 
-        report = None
         if write_xlsx:
-            report = self.write(out_path, include_recipients=include_recipients_sheet)
+            reports.append(self.write(out_path, include_recipients=include_recipients_sheet))
+        report = reports[-1] if reports else None
         skipped = self._store.skipped()
         if skipped or self._broadcast_note:
             return RunResult(EXIT_PARTIAL, report, self._broadcast_note + (
                 f"{len(skipped)} item(s) could not be exported; "
-                "see the Export Info sheet or `qexport status`." if skipped else ""))
-        return RunResult(EXIT_OK, report)
+                "see the Export Info sheet or `qexport status`." if skipped else ""), tuple(reports))
+        return RunResult(EXIT_OK, report, reports=tuple(reports))
 
     def write(self, out_path: Path | None = None, include_recipients: bool = True) -> ExportReport:
-        self._p.phase("Deriving customer actions", None)
-        n = rebuild_actions(self._store, self._s.attribution_window_days)
-        self._p.advance(0, actions=n)
-        path = out_path or default_out_path(self._s)
-        self._p.phase("Writing workbook", None)
-        return self._writer.write(self._store, path, on_row=lambda k: self._p.advance(1000),
-                                  include_recipients=include_recipients)
+        return build_workbook(self._store, self._s, self._writer, self._p, out_path, include_recipients)
+
+    def _write_quietly(self, reports: list[ExportReport], out_path: Path | None,
+                       include_recipients: bool, why: str) -> None:
+        """An extra workbook must never cost the run: failures (file open in Excel, Ctrl+C)
+        are reported and skipped."""
+        self._p.warn(why)
+        try:
+            reports.append(self.write(out_path, include_recipients=include_recipients))
+        except (KeyboardInterrupt, RunCancelled):
+            self._p.warn("Workbook skipped.")
+        except Exception as e:   # noqa: BLE001 - the downloaded data is safe either way
+            self._p.warn(f"Could not write the workbook ({e}). The data is safe; rebuild it with "
+                         "`qexport write-xlsx`.")
+
+    def _broadcast_work_left(self, limit: int | None) -> bool:
+        return any(True for _ in self._store.iter_jobs_to_fetch(
+            self._s.max_room_attempts, self._s.broadcasts_since, 1 if limit is None else min(limit, 1)))
+
+    def _has_data(self) -> bool:
+        p = self._store.progress()
+        return p.done > 0 or p.jobs_done > 0
 
     # ------------------------------------------------------------------ phases
 
@@ -165,6 +227,7 @@ class ExportOrchestrator:
         self._p.phase("Downloading conversations", len(rooms))
         streak: tuple[str, int] = ("", 0)
         for room in rooms:
+            self._p.item(room.customer_name or room.room_id)
             try:
                 msgs = self._fetch.fetch_room(room)
             except _ITEM_ERRORS as e:
@@ -183,6 +246,7 @@ class ExportOrchestrator:
         self._p.phase("Downloading broadcast recipient logs", len(jobs))
         streak: tuple[str, int] = ("", 0)
         for job_id, name, _total in jobs:
+            self._p.item(name)
             try:
                 logs = self._log_fetch.fetch_job(job_id)
             except _ITEM_ERRORS as e:
@@ -212,8 +276,8 @@ def _bump_streak(streak: tuple[str, int], kind: str) -> tuple[str, int]:
     return kind, n
 
 
-def default_out_path(settings: Settings) -> Path:
+def default_out_path(settings: Settings, partial: bool = False) -> Path:
     from datetime import datetime
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
-    return settings.out_dir / f"qiscus_export_{settings.app_code}_{stamp}.xlsx"
+    return settings.out_dir / f"qiscus_export_{settings.app_code}_{stamp}{'_PARTIAL' if partial else ''}.xlsx"

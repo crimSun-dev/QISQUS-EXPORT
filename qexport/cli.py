@@ -17,7 +17,7 @@ from qexport.config import Settings, load_settings
 from qexport.extract.broadcasts import BroadcastEnumerator, BroadcastLogFetcher
 from qexport.extract.messages import MessageFetcher
 from qexport.extract.rooms import RoomEnumerator
-from qexport.load.excel import ExcelWriter, ExportReport
+from qexport.load.excel import ExcelWriter, ExportReport, WorkbookLockedError, finish_locked_workbook
 from qexport.orchestrator import (
     EXIT_AUTH, EXIT_OK, ExportOrchestrator, NullProgress, RunResult, default_out_path,
 )
@@ -55,6 +55,8 @@ class RichProgress:
             return
         text = " ".join(f"{k}={v}" for k, v in info.items())
         self._bar.update(self._task, advance=n, **({"info": text} if text else {}))
+
+    def item(self, label: str) -> None: ...
 
     def warn(self, msg: str) -> None:
         self._warnings += 1
@@ -105,6 +107,7 @@ def _build(s: Settings, store: CheckpointStore, progress: RichProgress
 def _print_report(r: ExportReport) -> None:
     t = Table(title="Export written", show_header=False)
     t.add_row("File", str(r.path.resolve()))
+    t.add_row("Completeness", r.completeness)
     t.add_row("Conversations", f"{r.rooms:,}")
     t.add_row("Messages", f"{r.messages:,}")
     t.add_row("Customer actions", f"{r.actions:,}")
@@ -117,7 +120,29 @@ def _print_report(r: ExportReport) -> None:
     console.print(t)
 
 
+def _retry_locked(err: WorkbookLockedError) -> ExportReport | None:
+    """The workbook is finished but its target is open in Excel: let the user close it and retry."""
+    for _ in range(5):
+        console.print(f"[yellow]{err.target.name} is open in another program (Excel?).[/] "
+                      "Close it, then press Enter to save the new workbook (or type s to skip).")
+        try:
+            answer = typer.prompt("", default="", show_default=False, prompt_suffix="")
+        except Exception:   # no console (EOF) / Ctrl+C
+            answer = "s"
+        if answer.strip().lower().startswith("s"):
+            break
+        try:
+            return finish_locked_workbook(err)
+        except WorkbookLockedError as again:
+            err = again
+    console.print(f"[red]Not saved over {err.target.name}.[/] The new workbook is complete at "
+                  f"[bold]{err.partial.resolve()}[/]; rename it to .xlsx to open it.")
+    return None
+
+
 def _finish(result: RunResult) -> None:
+    for r in result.reports[:-1]:
+        _print_report(r)
     if result.report:
         _print_report(result.report)
     if result.message:
@@ -150,6 +175,11 @@ def _run(out: Optional[Path], since_last_run: bool, limit_rooms: Optional[int],
                         limit_jobs=limit_jobs, include_messages=not no_messages,
                         include_broadcasts=not no_broadcasts,
                         include_recipients_sheet=not no_recipients_sheet, out_path=out_path)
+            except WorkbookLockedError as e:
+                report = _retry_locked(e)
+                if report is None:
+                    raise typer.Exit(1)
+                result = RunResult(EXIT_OK if report.complete else 3, report, reports=(report,))
             except PermissionError as e:
                 console.print(f"[red]Could not write the workbook ({e}).[/] Close it in Excel, then run "
                               "`qexport write-xlsx`. Downloaded data is safe in the .sqlite3 store.")
@@ -265,8 +295,12 @@ def write_xlsx(out: Optional[Path] = OutOpt, no_recipients_sheet: bool = NoRecip
         out_path = out if out.suffix.lower() == ".xlsx" else out / default_out_path(s).name
     orch = ExportOrchestrator(s, None, store, None, None, ExcelWriter(norm), NullProgress())  # type: ignore[arg-type]
     try:
-        with console.status("Deriving actions and writing workbook…"):
+        with console.status("Snapshotting data, deriving actions and writing workbook…"):
             report = orch.write(out_path, include_recipients=not no_recipients_sheet)
+    except WorkbookLockedError as e:
+        report = _retry_locked(e)
+        if report is None:
+            raise typer.Exit(1)
     except PermissionError as e:
         console.print(f"[red]Could not write the workbook ({e}).[/] Close it in Excel and run again.")
         raise typer.Exit(1)
@@ -408,6 +442,15 @@ def setup(env_file: Path = typer.Option(Path(".env"), "--env-file", help="Where 
         console.print("[red]Login check failed.[/] Make sure you're logged in, then run `qexport setup` again.")
         raise typer.Exit(EXIT_AUTH)
     console.print("[green]Connected. You're ready to export.[/]")
+
+
+@app.command()
+def gui(no_window: bool = typer.Option(False, "--no-window", help="Print the address instead of opening a window")
+        ) -> None:
+    """Open the Qiscus Export window: downloads, Excel files and progress in one place."""
+    from qexport.gui.server import main as gui_main
+
+    raise typer.Exit(gui_main(Path.cwd(), open_window=not no_window))
 
 
 def main() -> None:   # pragma: no cover
