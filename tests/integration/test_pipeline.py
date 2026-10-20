@@ -15,7 +15,7 @@ from qexport.load.excel import (
     ACTIONS_COLUMNS, CAMPAIGNS_COLUMNS, CONVERSATIONS_COLUMNS, LEADS_COLUMNS, MESSAGES_COLUMNS,
     RECIPIENTS_COLUMNS, ExcelWriter,
 )
-from qexport.orchestrator import EXIT_AUTH, EXIT_OK, EXIT_PARTIAL, ExportOrchestrator
+from qexport.orchestrator import EXIT_AUTH, EXIT_OK, EXIT_PARTIAL, EXIT_SCHEMA, ExportOrchestrator
 from qexport.store.checkpoint import CheckpointStore, StoreAppMismatchError
 from tests.conftest import (
     ADMIN_EMAIL, APP, OMNI, SDK, comment, comments_page, jobs_page, logs_page, raw_job, raw_log, raw_room,
@@ -353,3 +353,81 @@ def test_formula_like_customer_text_is_neutralized(settings, client, store, norm
     ws = load_workbook(out)["Messages"]
     cell = ws.cell(row=2, column=12)
     assert cell.data_type == "s" and cell.value.startswith("'=")
+
+
+# --------------------------------------------------------------------------- broadcast failures
+
+def _jobs_only(jobs: list[dict], logs: dict):
+    """Mocks broadcast endpoints only; logs maps job_id -> status code or list of raw logs."""
+    respx.post(JOBS_URL).mock(return_value=httpx.Response(200, json=jobs_page(jobs, None)))
+    routes = {}
+    for job_id, body in logs.items():
+        resp = (httpx.Response(body, json={"errors": "broadcast log unavailable"}) if isinstance(body, int)
+                else httpx.Response(200, json=logs_page(body, None)))
+        routes[job_id] = respx.get(logs_url(job_id)).mock(return_value=resp)
+    return routes
+
+
+@respx.mock
+def test_broadcast_400_skips_that_job_and_run_continues(settings, client, store, norm):
+    _jobs_only([raw_job(901, "Refused"), raw_job(902, "Fine")],
+               {901: 400, 902: [raw_log(1, "6281200000001")]})
+    result = build(settings, client, store, norm).run(write_xlsx=False, include_messages=False)
+    assert result.exit_code == EXIT_PARTIAL
+    (kind, ident, err), = store.skipped()
+    assert (kind, ident) == ("broadcast job", "901") and "HTTP 400" in err and "unavailable" in err
+    assert store.counts()["broadcast_logs"] == 1
+
+
+@respx.mock
+def test_unsent_jobs_are_not_fetched_until_their_status_changes(settings, client, store, norm):
+    routes = _jobs_only([raw_job(903, "Later", status=4), raw_job(904, "Queued", status=0),
+                         raw_job(905, "Prep", status=7)], {903: 400, 904: 400, 905: 400})
+    result = build(settings, client, store, norm).run(write_xlsx=False, include_messages=False)
+    assert result.exit_code == EXIT_OK and all(r.call_count == 0 for r in routes.values())
+
+    respx.post(JOBS_URL).mock(return_value=httpx.Response(200, json=jobs_page(
+        [raw_job(903, "Later", status=2)], None)))
+    respx.get(logs_url(903)).mock(return_value=httpx.Response(200, json=logs_page(
+        [raw_log(1, "6281200000001")], None)))
+    result = build(settings, client, store, norm).run(write_xlsx=False, include_messages=False,
+                                                      since_last_run=True)
+    assert result.exit_code == EXIT_OK and store.counts()["broadcast_logs"] == 1
+
+
+@respx.mock
+def test_skipped_job_is_retried_once_its_status_changes(settings, client, store, norm):
+    settings.max_room_attempts = 1
+    _jobs_only([raw_job(906, "Flaky", status=1)], {906: 400})
+    build(settings, client, store, norm).run(write_xlsx=False, include_messages=False)
+    assert len(store.skipped()) == 1
+
+    respx.post(JOBS_URL).mock(return_value=httpx.Response(200, json=jobs_page(
+        [raw_job(906, "Flaky", status=2)], None)))
+    respx.get(logs_url(906)).mock(return_value=httpx.Response(200, json=logs_page(
+        [raw_log(1, "6281200000001")], None)))
+    result = build(settings, client, store, norm).run(write_xlsx=False, include_messages=False,
+                                                      since_last_run=True)
+    assert result.exit_code == EXIT_OK and store.skipped() == []
+
+
+@respx.mock
+def test_every_broadcast_refused_still_writes_the_conversations_workbook(settings, client, store, norm,
+                                                                         tmp_path):
+    respx.post(ROOMS_URL).mock(return_value=httpx.Response(200, json=rooms_page([raw_room(1)], None)))
+    respx.get(COMMENTS_URL).mock(return_value=httpx.Response(200, json=comments_page([
+        comment(1, 491000001, email="6281200000001", text="Halo")])))
+    routes = _jobs_only([raw_job(1000 + n, f"Job {n}") for n in range(20)], {1000 + n: 400 for n in range(20)})
+    out = tmp_path / "o.xlsx"
+    result = build(settings, client, store, norm).run(out_path=out)
+    assert result.exit_code == EXIT_PARTIAL and out.exists() and result.report is not None
+    assert "Broadcast recipient download stopped" in result.message
+    assert sum(r.call_count for r in routes.values()) == 15
+    assert store.progress().done == 1
+
+
+@respx.mock
+def test_global_4xx_exits_cleanly_instead_of_crashing(settings, client, store, norm):
+    respx.post(ROOMS_URL).mock(return_value=httpx.Response(400, text="bad request"))
+    result = build(settings, client, store, norm, broadcasts=False).run(write_xlsx=False)
+    assert result.exit_code == EXIT_SCHEMA and "bad request" in result.message

@@ -19,6 +19,8 @@ JOB_STATUS = {
     4: "scheduled", 5: "canceled", 6: "unfinished", 7: "preparing",
 }
 JOB_TERMINAL_STATUSES = {2, 3, 5, 6}
+# Not sent yet: Qiscus has no recipient log for these and answers broadcast_logs with HTTP 400.
+JOB_NO_LOGS_YET_STATUSES = {0, 4, 7}
 
 # BROADCAST_LOG_STATUS enum (per recipient)
 LOG_STATUS = {

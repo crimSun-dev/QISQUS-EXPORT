@@ -36,6 +36,25 @@ class RoomAccessError(QiscusError):
         self.room_id, self.status = room_id, status
 
 
+class ItemRejectedError(QiscusError):
+    """Any other 4xx on a single room or broadcast job (e.g. a campaign that is scheduled, cancelled
+    or still sending) -> mark that item failed, keep going. Keeps Qiscus's reason for the report."""
+
+    def __init__(self, item: str, status: int, detail: str = "") -> None:
+        msg = f"{item} rejected by Qiscus (HTTP {status})"
+        super().__init__(f"{msg}: {detail}" if detail else msg)
+        self.item, self.status, self.detail = item, status, detail
+
+
+class ApiRequestError(QiscusError):
+    """Unexpected 4xx on a *global* call -> abort run (resumable) with Qiscus's reason, not a traceback."""
+
+    def __init__(self, endpoint: str, status: int, detail: str = "") -> None:
+        msg = f"{endpoint}: Qiscus refused the request (HTTP {status})"
+        super().__init__(f"{msg}: {detail}" if detail else msg)
+        self.endpoint, self.status, self.detail = endpoint, status, detail
+
+
 class RateLimitExhausted(QiscusError): ...
 
 
@@ -197,7 +216,8 @@ class QiscusClient:
                           "customer_rooms", json=body, headers=self._omni_headers)
         if resp.status_code in (401, 403):
             raise AuthError("omni", resp.status_code)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise ApiRequestError("customer_rooms", resp.status_code, _detail(resp))
         data = self._json(resp, "customer_rooms")
         rooms = self._parse(RawRoom, self._dig(data, "customer_rooms", "data", "customer_rooms"),
                             "customer_rooms")
@@ -215,7 +235,8 @@ class QiscusClient:
                           "broadcast_jobs", json=body, headers=self._omni_headers)
         if resp.status_code in (401, 403):
             raise AuthError("omni", resp.status_code)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise ApiRequestError("broadcast_jobs", resp.status_code, _detail(resp))
         data = self._json(resp, "broadcast_jobs")
         jobs = self._parse(RawBroadcastJob, self._dig(data, "broadcast_jobs", "data", "broadcast_jobs"),
                            "broadcast_jobs")
@@ -235,7 +256,8 @@ class QiscusClient:
             raise AuthError("omni", 401)
         if resp.status_code in (403, 404):
             raise RoomAccessError(f"broadcast job {job_id}", resp.status_code)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise ItemRejectedError(f"broadcast job {job_id}", resp.status_code, _detail(resp))
         data = self._json(resp, "broadcast_logs")
         logs = self._parse(RawBroadcastLog, self._dig(data, "broadcast_logs", "data", "broadcast_logs"),
                            "broadcast_logs")
@@ -256,7 +278,8 @@ class QiscusClient:
             raise AuthError("sdk", 401)
         if resp.status_code in (403, 404):
             raise RoomAccessError(room_id, resp.status_code)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise ItemRejectedError(f"room {room_id}", resp.status_code, _detail(resp))
         data = self._json(resp, "load_comments")
         return self._parse(RawComment, self._dig(data, "load_comments", "results", "comments"),
                            "load_comments")
@@ -279,6 +302,11 @@ class QiscusClient:
 
     def close(self) -> None:
         self._http.close()
+
+
+def _detail(resp: httpx.Response) -> str:
+    """Qiscus's error body, squashed to one short line for logs and the Export Info sheet."""
+    return " ".join((resp.text or "").split())[:200]
 
 
 def _first_error(e: ValidationError) -> str:

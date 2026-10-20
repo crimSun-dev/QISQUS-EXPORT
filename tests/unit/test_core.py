@@ -8,7 +8,8 @@ import respx
 from pydantic import ValidationError
 
 from qexport.api.client import (
-    AuthError, RateLimiter, RateLimitExhausted, RoomAccessError, SchemaDriftError,
+    ApiRequestError, AuthError, ItemRejectedError, RateLimiter, RateLimitExhausted, RoomAccessError,
+    SchemaDriftError,
 )
 from qexport.api.models import RawBroadcastLog, RawComment, RawRoom
 from qexport.config import Settings
@@ -281,3 +282,29 @@ def test_sanitize_cell_truncates_over_32767_chars_and_flags():
 @pytest.mark.parametrize("value", ["see you 🤍", "pake bahasa Indonesia aj"])
 def test_sanitize_cell_preserves_emoji_and_indonesian_text(value):
     assert sanitize_cell(value) == (value, False)
+
+
+@respx.mock
+def test_broadcast_logs_400_raises_item_rejected_with_reason_and_no_retry(client):
+    route = respx.get(f"{OMNI}/api/v2/admin/broadcast_logs/448888104").mock(
+        return_value=httpx.Response(400, text="broadcast is not\n   finished"))
+    with pytest.raises(ItemRejectedError) as e:
+        client.list_broadcast_logs(448888104, None)
+    assert route.call_count == 1
+    assert e.value.status == 400 and "broadcast is not finished" in str(e.value)
+
+
+@respx.mock
+def test_load_comments_unexpected_4xx_is_an_item_error(client):
+    respx.get(f"{SDK}/api/v2/sdk/load_comments").mock(return_value=httpx.Response(410, text="gone"))
+    with pytest.raises(ItemRejectedError) as e:
+        client.load_comments("491314784", None)
+    assert "room 491314784" in str(e.value) and e.value.status == 410
+
+
+@respx.mock
+def test_global_call_unexpected_4xx_raises_api_request_error(client):
+    respx.post(f"{OMNI}/api/v2/customer_rooms").mock(return_value=httpx.Response(400, text="bad limit"))
+    with pytest.raises(ApiRequestError) as e:
+        client.list_customer_rooms(None)
+    assert "customer_rooms" in str(e.value) and "bad limit" in str(e.value)

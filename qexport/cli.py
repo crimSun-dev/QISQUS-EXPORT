@@ -206,7 +206,8 @@ def export(out: Optional[Path] = OutOpt, since_last_run: bool = SinceOpt,
     """Download everything (resumable) and write the workbook.
 
     Exit codes: 0 complete | 3 partial (skipped items) | 2 auth expired (resumable)
-    | 4 rate limited (resumable) | 5 API schema changed | 130 interrupted."""
+    | 4 rate limited (resumable) | 5 API changed / refused a request (resumable)
+    | 6 network down (resumable) | 130 interrupted."""
     _run(out, since_last_run, limit_rooms, limit_jobs, rooms_rps, messages_rps, broadcast_rps,
          no_xlsx, no_broadcasts, no_messages, no_recipients_sheet, broadcasts_since)
 

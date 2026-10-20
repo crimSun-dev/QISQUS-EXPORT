@@ -68,7 +68,8 @@ if "%RC%"=="0"   echo  Finished successfully.
 if "%RC%"=="2"   echo  The Qiscus login expired or is wrong. Use option 7, then option 1 to continue.
 if "%RC%"=="3"   echo  Finished, but some items could not be exported. See the "Export Info" sheet.
 if "%RC%"=="4"   echo  Qiscus is rate-limiting. Progress is saved; wait a few minutes, then option 1.
-if "%RC%"=="5"   echo  Qiscus changed its API. The tool needs an update; progress is saved.
+if "%RC%"=="5"   echo  Qiscus refused a request or changed its API. Progress is saved; send the message above to support.
+if "%RC%"=="6"   echo  Could not reach Qiscus. Check the internet connection, then option 1 to continue.
 if "%RC%"=="130" echo  Stopped. Progress is saved; option 1 continues where it left off.
 echo.
 pause

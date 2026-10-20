@@ -11,12 +11,14 @@ from datetime import date, datetime, timezone
 from importlib import resources
 from pathlib import Path
 
+from qexport.api import endpoints as ep
 from qexport.transform.actions import ActionRecord, ActionType, Attribution, CampaignRef, Touch
 from qexport.transform.normalize import (
     BroadcastJobRecord, BroadcastLogRecord, MessageRecord, RoomRecord, SenderType, normalize_phone,
 )
 
 SCHEMA_VERSION = 2
+_NO_LOGS_YET = tuple(ep.JOB_STATUS[s] for s in sorted(ep.JOB_NO_LOGS_YET_STATUSES))
 
 
 class StoreAppMismatchError(Exception):
@@ -277,7 +279,8 @@ class CheckpointStore:
                     (j.job_id, j.name, j.template_name, j.category, j.status, j.channel_id, j.channel_name,
                      iso(j.created_at_utc), iso(j.started_at_utc), iso(j.finished_at_utc),
                      j.total_recipient, j.total_sent, j.total_delivered, j.total_read, j.total_failed, sig))
-                if prev is not None and prev["logs_state"] == "done" and prev["fetched_signature"] != sig:
+                if prev is not None and prev["logs_state"] in ("done", "failed", "skipped") and (
+                        prev["fetched_signature"] if prev["logs_state"] == "done" else prev["signature"]) != sig:
                     self._db.execute(
                         "UPDATE broadcast_jobs SET logs_state='pending', attempts=0 WHERE job_id=?",
                         (j.job_id,))
@@ -292,10 +295,13 @@ class CheckpointStore:
 
     def iter_jobs_to_fetch(self, max_attempts: int, since: date | None = None,
                            limit: int | None = None) -> Iterator[tuple[int, str, int]]:
-        """(job_id, name, total_recipient) for pending + failed(attempts < max) jobs, newest first."""
+        """(job_id, name, total_recipient) for pending + failed(attempts < max) jobs, newest first.
+        Jobs that have not started sending (queued/scheduled/preparing) wait in 'pending' until a
+        later run sees their status change."""
         sql = ("SELECT job_id, name, total_recipient FROM broadcast_jobs WHERE "
-               "(logs_state='pending' OR (logs_state='failed' AND attempts < ?))")
-        params: tuple = (max_attempts,)
+               "(logs_state='pending' OR (logs_state='failed' AND attempts < ?)) "
+               f"AND status NOT IN ({','.join('?' * len(_NO_LOGS_YET))})")
+        params: tuple = (max_attempts, *_NO_LOGS_YET)
         if since is not None:
             sql += " AND created_at_utc >= ?"
             params += (since.isoformat(),)

@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Protocol
 
 from qexport.api.client import (
-    AuthError, NetworkExhausted, QiscusClient, RateLimitExhausted, RoomAccessError, SchemaDriftError,
+    ApiRequestError, AuthError, ItemRejectedError, NetworkExhausted, QiscusClient, RateLimitExhausted,
+    RoomAccessError, SchemaDriftError,
 )
 from qexport.config import Settings
 from qexport.extract.broadcasts import BroadcastEnumerator, BroadcastLogFetcher
@@ -18,10 +19,11 @@ from qexport.store.checkpoint import CheckpointStore, iso
 from qexport.transform.actions import ActionRecord, derive_actions
 from qexport.transform.normalize import normalize_phone
 
-EXIT_OK, EXIT_AUTH, EXIT_PARTIAL, EXIT_RATE_LIMIT, EXIT_SCHEMA, EXIT_INTERRUPTED = 0, 2, 3, 4, 5, 130
+EXIT_OK, EXIT_AUTH, EXIT_PARTIAL, EXIT_RATE_LIMIT, EXIT_SCHEMA, EXIT_NETWORK, EXIT_INTERRUPTED = (
+    0, 2, 3, 4, 5, 6, 130)
 
 # Per-item errors: mark that room/job failed and keep going.
-_ITEM_ERRORS = (RoomAccessError, CursorLoopError, SchemaDriftError, NetworkExhausted)
+_ITEM_ERRORS = (RoomAccessError, ItemRejectedError, CursorLoopError, SchemaDriftError, NetworkExhausted)
 _CIRCUIT_BREAKER = 15   # this many consecutive item failures of one kind -> something global is wrong
 
 
@@ -79,6 +81,7 @@ class ExportOrchestrator:
         self._enum, self._fetch, self._writer = enumerator, fetcher, writer
         self._bc_enum, self._log_fetch = broadcast_enumerator, log_fetcher
         self._p = progress or NullProgress()
+        self._broadcast_note = ""
 
     def run(self, *, since_last_run: bool = False, write_xlsx: bool = True,
             limit_rooms: int | None = None, limit_jobs: int | None = None,
@@ -102,6 +105,12 @@ class ExportOrchestrator:
             return RunResult(EXIT_RATE_LIMIT, None,
                              f"{e}. Progress is saved; wait a few minutes, then `qexport resume` "
                              "with lower --rooms-rps / --messages-rps.")
+        except NetworkExhausted as e:
+            return RunResult(EXIT_NETWORK, None,
+                             f"{e}. Could not reach Qiscus. Progress is saved; check the internet "
+                             "connection, then `qexport resume`.")
+        except (SchemaDriftError, ApiRequestError) as e:
+            return RunResult(EXIT_SCHEMA, None, f"{e}. Progress is saved; `qexport resume` once this is fixed.")
         except RunAborted as e:
             return RunResult(e.exit_code, None, str(e))
         except KeyboardInterrupt:
@@ -114,9 +123,10 @@ class ExportOrchestrator:
         if write_xlsx:
             report = self.write(out_path, include_recipients=include_recipients_sheet)
         skipped = self._store.skipped()
-        if skipped:
-            return RunResult(EXIT_PARTIAL, report, f"{len(skipped)} item(s) could not be exported; "
-                                                   "see the Export Info sheet or `qexport status`.")
+        if skipped or self._broadcast_note:
+            return RunResult(EXIT_PARTIAL, report, self._broadcast_note + (
+                f"{len(skipped)} item(s) could not be exported; "
+                "see the Export Info sheet or `qexport status`." if skipped else ""))
         return RunResult(EXIT_OK, report)
 
     def write(self, out_path: Path | None = None, include_recipients: bool = True) -> ExportReport:
@@ -178,8 +188,15 @@ class ExportOrchestrator:
             except _ITEM_ERRORS as e:
                 self._store.mark_job_failed(job_id, f"{type(e).__name__}: {e}", self._s.max_room_attempts)
                 self._p.warn(f"broadcast {name!r}: {type(e).__name__}")
-                streak = _bump_streak(streak, type(e).__name__)
                 self._p.advance(1)
+                try:
+                    streak = _bump_streak(streak, type(e).__name__)
+                except RunAborted as stop:
+                    # Recipient logs are an extra; never let them cost the conversations workbook.
+                    self._broadcast_note = (f"Broadcast recipient download stopped: {stop} "
+                                            f"Last error: {e}. ")
+                    self._p.warn(self._broadcast_note)
+                    return
                 continue
             self._store.commit_job_logs(job_id, logs)
             streak = ("", 0)
@@ -190,7 +207,7 @@ def _bump_streak(streak: tuple[str, int], kind: str) -> tuple[str, int]:
     n = streak[1] + 1 if streak[0] == kind else 1
     if n >= _CIRCUIT_BREAKER:
         code = EXIT_SCHEMA if kind == "SchemaDriftError" else EXIT_PARTIAL
-        raise RunAborted(code,f"{n} consecutive items failed with {kind}; stopping. "
+        raise RunAborted(code, f"{n} consecutive items failed with {kind}; stopping. "
                                "Progress is saved. Check the error in `qexport status`.")
     return kind, n
 
