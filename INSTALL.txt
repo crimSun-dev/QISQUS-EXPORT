@@ -3,7 +3,8 @@ QISCUS EXPORT - INSTALLING ON A NEW PC
 
 1. Open the zip and double-click  Install Qiscus Export.bat
    (no need to extract anything first; that one file contains the whole program).
-   - It installs Python automatically if this PC doesn't have it (needs internet).
+   - It needs no internet: Python and every library it uses are packed inside.
+     (Python is only installed if this PC doesn't already have 3.11 or newer.)
    - It installs Qiscus Export into your user folder and puts two icons on the desktop:
      "Qiscus Export" and "Qiscus Export (menu)".
    - It opens Qiscus Export when it's done.

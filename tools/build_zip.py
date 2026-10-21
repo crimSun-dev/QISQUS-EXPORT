@@ -4,6 +4,10 @@
                                    inside the zip) and it unpacks qexport, installs it and opens it
   dist/qexport-<version>.zip       that installer plus INSTALL.txt, for sending around
 
+The installer works with no internet at all: it carries every library as a wheel (wheels/, for
+Python 3.11-3.14 on x64 and ARM64) and the official Python installer (python/), used only when the
+PC has no Python 3.11+. Both are downloaded once into build/offline/ and reused by later builds.
+
 Never includes credentials (.env), downloaded data (exports/), or the local virtualenv.
 Usage:  python tools/build_zip.py
 """
@@ -12,8 +16,11 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import re
+import subprocess
 import sys
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -25,6 +32,14 @@ EXCLUDE_SUFFIXES = {".pyc", ".sqlite3", ".lock", ".partial", ".xlsx"}
 FORBIDDEN_NAMES = {".env"}
 SETUP_NAME = "Install Qiscus Export.bat"
 MARKER = "::QXPAYLOAD" + "::"          # split so this file never contains the marker itself
+
+OFFLINE = ROOT / "build" / "offline"
+WHEEL_PLATFORMS = ["win_amd64", "win_arm64"]
+WHEEL_PYTHONS = ["3.11", "3.12", "3.13", "3.14"]
+# 3.12.10 is the last 3.12 with a Windows installer; x64 also runs on ARM64 laptops (emulated).
+PYTHON_VERSION = "3.12.10"
+PYTHON_EXE = f"python-{PYTHON_VERSION}-amd64.exe"
+PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/{PYTHON_EXE}"
 
 # The PowerShell finds the marker at run time from two halves, so it never matches its own text.
 SETUP_SCRIPT = r"""@echo off
@@ -41,7 +56,7 @@ echo.
 echo  Installing Qiscus Export {version} into:
 echo    %QEXPORT_HOME%
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $m='::QXPAYLOAD'+'::'; $t=[IO.File]::ReadAllText($env:QX_SELF); $i=$t.LastIndexOf($m); if ($i -lt 0) {{ throw 'installer is damaged (no payload)' }}; $b=$t.Substring($i+$m.Length) -replace '[^A-Za-z0-9+/=]',''; $z=Join-Path $env:TEMP ('qexport-'+[guid]::NewGuid().ToString()+'.zip'); [IO.File]::WriteAllBytes($z,[Convert]::FromBase64String($b)); $d=$env:QEXPORT_HOME; New-Item -ItemType Directory -Force -Path $d | Out-Null; $code=Join-Path $d 'qexport'; if (Test-Path $code) {{ Remove-Item -Recurse -Force $code }}; Expand-Archive -Path $z -DestinationPath $d -Force; Remove-Item $z"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $m='::QXPAYLOAD'+'::'; $t=[IO.File]::ReadAllText($env:QX_SELF); $i=$t.LastIndexOf($m); if ($i -lt 0) {{ throw 'installer is damaged (no payload)' }}; $b=$t.Substring($i+$m.Length) -replace '[^A-Za-z0-9+/=]',''; $z=Join-Path $env:TEMP ('qexport-'+[guid]::NewGuid().ToString()+'.zip'); [IO.File]::WriteAllBytes($z,[Convert]::FromBase64String($b)); $d=$env:QEXPORT_HOME; New-Item -ItemType Directory -Force -Path $d | Out-Null; foreach ($old in 'qexport','wheels','python') {{ $p=Join-Path $d $old; if (Test-Path $p) {{ Remove-Item -Recurse -Force $p }} }}; Expand-Archive -Path $z -DestinationPath $d -Force; Remove-Item $z"
 if errorlevel 1 (
   echo.
   echo  Could not unpack Qiscus Export. If the antivirus blocked it, allow it and try again.
@@ -79,12 +94,46 @@ def files() -> list[Path]:
     return out
 
 
-def payload(chosen: list[Path]) -> bytes:
-    """The program as a zip with install.bat at its root."""
+def offline_files() -> dict[str, Path]:
+    """Wheels for qexport's libraries (and setuptools, to build qexport itself) plus the Python
+    installer, so install.bat never needs the internet. Downloaded once, then reused."""
+    wheels = OFFLINE / "wheels"
+    wheels.mkdir(parents=True, exist_ok=True)
+    for plat in WHEEL_PLATFORMS:
+        for ver in WHEEL_PYTHONS:
+            subprocess.run([sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check",
+                            "--only-binary=:all:", "--platform", plat, "--python-version", ver,
+                            "--implementation", "cp", "-d", str(wheels), str(ROOT), "setuptools>=68"],
+                           check=True)
+    py = OFFLINE / PYTHON_EXE
+    if not py.exists():
+        print(f"downloading {PYTHON_URL}")
+        tmp = py.with_suffix(".partial")
+        urllib.request.urlretrieve(PYTHON_URL, tmp)
+        tmp.replace(py)
+    if os.name == "nt":                # refuse to ship an installer that isn't signed by the PSF
+        # The path can contain apostrophes, so it reaches PowerShell through an env var.
+        sig = subprocess.run(["powershell", "-NoProfile", "-Command",
+                              "$s=Get-AuthenticodeSignature -LiteralPath $env:QX_PY; "
+                              "\"$($s.Status)|$($s.SignerCertificate.Subject)\""],
+                             env={**os.environ, "QX_PY": str(py)},
+                             capture_output=True, text=True, check=True).stdout.strip()
+        if not sig.startswith("Valid|") or "Python Software Foundation" not in sig:
+            py.unlink()
+            raise SystemExit(f"{PYTHON_EXE} failed its signature check ({sig}); deleted, run again")
+    out = {f"wheels/{w.name}": w for w in sorted(wheels.glob("*.whl"))}
+    out[f"python/{PYTHON_EXE}"] = py
+    return out
+
+
+def payload(chosen: list[Path], extra: dict[str, Path] | None = None) -> bytes:
+    """The program as a zip with install.bat at its root; extra maps archive names to files."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for f in chosen:
             z.write(f, f.relative_to(ROOT).as_posix())
+        for name, f in (extra or {}).items():
+            z.write(f, name)
     names = zipfile.ZipFile(io.BytesIO(buf.getvalue())).namelist()
     assert not any(n == ".env" or n.endswith("/.env") for n in names), "credentials leaked into the payload"
     assert "install.bat" in names
@@ -108,12 +157,12 @@ def main() -> int:
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
     chosen = files()
-    setup = build_setup(__version__, payload(chosen), dist / SETUP_NAME)
+    setup = build_setup(__version__, payload(chosen, offline_files()), dist / SETUP_NAME)
     target = dist / f"qexport-{__version__}.zip"
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(setup, SETUP_NAME)
         z.write(ROOT / "INSTALL.txt", "INSTALL.txt")
-    print(f"{setup}  ({setup.stat().st_size / 1024:.0f} KB, {len(chosen)} files packed)")
+    print(f"{setup}  ({setup.stat().st_size / 1024:.0f} KB, {len(chosen)} files packed, works offline)")
     print(f"{target}  ({target.stat().st_size / 1024:.0f} KB)")
     return 0
 

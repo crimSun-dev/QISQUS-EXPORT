@@ -11,7 +11,7 @@ action layers asked for in the 2026-10-16 screen recording (see "What changed vs
 
 ## Install on a new PC (no command line)
 
-1. Send the PC `dist\qexport-1.2.0.zip` (or just `dist\Install Qiscus Export.bat`).
+1. Send the PC `dist\qexport-1.2.1.zip` (or just `dist\Install Qiscus Export.bat`).
 2. Open the zip and double-click **Install Qiscus Export.bat**. No need to extract first: the one
    file carries the whole program. It:
    - unpacks qexport into `%LOCALAPPDATA%\Qiscus Export` (the login and downloaded data live there too);

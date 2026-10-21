@@ -32,6 +32,17 @@ call :find_python
 if defined PY goto :have_python
 
 echo       Python 3.11+ not found.
+rem The installer carries the official Python installer, so this works with no internet.
+set "PY_SETUP="
+for %%F in ("%~dp0python\python-*.exe") do set "PY_SETUP=%%~fF"
+if not defined PY_SETUP goto :try_winget
+echo       Installing Python from the installer (no internet needed, about a minute)...
+"%PY_SETUP%" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=0 Include_test=0 Include_doc=0 Include_tcltk=0 Shortcuts=0 AssociateFiles=0
+call :find_python
+if defined PY goto :have_python
+echo       That did not work; trying winget instead.
+
+:try_winget
 where winget >nul 2>&1
 if errorlevel 1 goto :no_winget
 echo       Installing Python 3.12 with winget (this can take a few minutes)...
@@ -62,13 +73,22 @@ if not exist "%VPY%" (
 :venv_ok
 
 rem ---------------------------------------------------------------- 3. packages
-echo [3/5] Installing qexport and its libraries (needs internet)...
-"%VPY%" -m pip install --upgrade pip --quiet --disable-pip-version-check
-"%VPY%" -m pip install -e . --quiet --disable-pip-version-check
+echo [3/5] Installing qexport and its libraries...
+set "PIP_DISABLE_PIP_VERSION_CHECK=1"
+set "PIP_NO_INPUT=1"
+rem The libraries ship in wheels\ (setuptools too, for building qexport), so no internet is needed.
+if not exist "%~dp0wheels\" goto :pip_online
+"%VPY%" -m pip install --no-index --find-links "%~dp0wheels" -e . --quiet
+if not errorlevel 1 goto :pip_done
+echo       The packed libraries did not fit this Python; downloading them instead...
+:pip_online
+rem Short timeout and few retries: a blocked network fails in a minute instead of looking frozen.
+"%VPY%" -m pip install -e . --timeout 20 --retries 2 --progress-bar on
 if errorlevel 1 (
   echo  Package installation failed. Check the internet connection and run install.bat again.
   goto :fail
 )
+:pip_done
 "%VPY%" -m qexport --help >nul 2>&1
 if errorlevel 1 (
   echo  qexport did not start after installation.
@@ -128,7 +148,7 @@ rem ============================================================================
 set "PY="
 for %%C in ("py -3.13" "py -3.12" "py -3.11" "py -3" "python" "python3") do call :try_python %%C
 if defined PY goto :eof
-for %%D in (Python313 Python312 Python311) do call :try_python_path "%LOCALAPPDATA%\Programs\Python\%%D\python.exe"
+for %%D in (Python314 Python313 Python312 Python311) do call :try_python_path "%LOCALAPPDATA%\Programs\Python\%%D\python.exe"
 goto :eof
 
 :try_python_path

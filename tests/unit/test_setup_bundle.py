@@ -49,3 +49,15 @@ def test_installer_unpacks_itself_from_a_lone_copy(tmp_path):
     assert (home / "install.bat").exists() and (home / "qexport" / "gui" / "server.py").exists()
     assert (home / "exports" / "keep.sqlite3").read_text() == "data" and (home / ".env").exists()
     assert not (home / "qexport" / "stale_module.py").exists()
+
+
+def test_offline_extras_ride_along_in_the_payload(tmp_path):
+    wheel = tmp_path / "demo-1.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    pyexe = tmp_path / "python-3.12.10-amd64.exe"
+    pyexe.write_bytes(b"MZ")
+    data = build_zip.payload(build_zip.files(), {f"wheels/{wheel.name}": wheel, f"python/{pyexe.name}": pyexe})
+    z = zipfile.ZipFile(__import__("io").BytesIO(data))
+    assert z.read("wheels/demo-1.0-py3-none-any.whl") == b"wheel" and "python/python-3.12.10-amd64.exe" in z.namelist()
+    bat = (Path(build_zip.ROOT) / "install.bat").read_text(encoding="utf-8")
+    assert '--no-index --find-links "%~dp0wheels"' in bat and "pip install --upgrade pip" not in bat
