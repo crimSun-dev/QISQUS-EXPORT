@@ -55,7 +55,7 @@ rem ---------------------------------------------------------------- 2. venv
 echo [2/5] Preparing a private Python environment (.venv)...
 if exist "%VPY%" goto :venv_ok
 %PY% -m venv "%VENV%"
-if errorlevel 1 (
+if not exist "%VPY%" (
   echo  Could not create the environment.
   goto :fail
 )
@@ -126,7 +126,7 @@ goto :end
 rem ============================================================================
 :find_python
 set "PY="
-for %%C in ("py -3.13" "py -3.12" "py -3.11" "python" "python3") do call :try_python %%C
+for %%C in ("py -3.13" "py -3.12" "py -3.11" "py -3" "python" "python3") do call :try_python %%C
 if defined PY goto :eof
 for %%D in (Python313 Python312 Python311) do call :try_python_path "%LOCALAPPDATA%\Programs\Python\%%D\python.exe"
 goto :eof
@@ -136,13 +136,15 @@ rem A full path may contain spaces, so PY keeps its quotes.
 if defined PY goto :eof
 if not exist "%~1" goto :eof
 "%~1" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
-if not errorlevel 1 set PY="%~1"
+if %errorlevel% equ 0 set PY="%~1"
 goto :eof
 
 :try_python
 if defined PY goto :eof
 %~1 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
-if not errorlevel 1 set "PY=%~1"
+rem Exactly 0: the Python install manager's py exits with a negative code when the version
+rem is missing, and "if not errorlevel 1" would count that as success.
+if %errorlevel% equ 0 set "PY=%~1"
 goto :eof
 
 :fail
